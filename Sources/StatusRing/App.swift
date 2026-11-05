@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import IOKit.ps
 import OSLog
@@ -81,6 +82,8 @@ struct StatusRingApp {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var item: NSStatusItem!
     private let panelModel = StatusPanelModel()
+    private let temperaturePreferences = TemperaturePreferences()
+    private var temperatureChanges: AnyCancellable?
     @MainActor private lazy var agenda = CalendarAgenda()
     @MainActor private lazy var modelMonitor = ModelMonitor()
     private let popover = NSPopover()
@@ -134,10 +137,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.animates = false
         popover.delegate = self
         let host = NSHostingController(rootView: StatusPanelView(model: panelModel, agenda: agenda, monitor: modelMonitor,
+            temperaturePreferences: temperaturePreferences,
             onCharge: { [weak self] in self?.chargeToFull() },
             onQuit: { [weak self] in self?.quitApp() }))
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
+        temperatureChanges = temperaturePreferences.$thresholds.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateDisplay() }
         refreshBattery()
         refreshBatteryHealth()
         startMetrics()
@@ -490,6 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         data.chargeHint = chargingError ?? (chargingState?.canOverride == false
             ? "当前没有需要解除的充电限制" : "临时解除充电限制，充至 100%")
         data.temperature = temperature.map { String(format: "%.0f °C", $0) } ?? "— °C"
+        data.temperatureCelsius = temperature
         data.temperatureHint = temperatureError ?? "CPU 传感器最高温度"
         data.cpu = resources?.cpuPercent
         data.memory = resources?.memoryPercent
@@ -544,7 +551,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let stale = quotaError != nil || (quota?.isStale() ?? false)
         let fraction = quota.flatMap { Date().timeIntervalSince($0.fetchedAt) <= 300 ? $0.remainingPercent / 100 : nil }
         button.image = RingRenderer.image(size: size, battery: battery, temperature: temperature,
-                                          quotaFraction: fraction, quotaStale: stale)
+                                          quotaFraction: fraction, quotaStale: stale,
+                                          thresholds: temperaturePreferences.thresholds, appearance: button.effectiveAppearance)
         updatePanel()
         let data = panelModel.data
         let description = ["电量 " + data.batteryText, data.powerText, "CPU " + data.temperature,
@@ -560,6 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         terminating = true
+        temperatureChanges?.cancel()
         removeOutsideClickMonitor()
         quotaTimer?.invalidate()
         quotaReader?.cancel()

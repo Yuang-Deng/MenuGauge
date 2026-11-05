@@ -8,6 +8,11 @@ enum PressureLevel: String {
         percent >= 80 ? .high : (percent >= 50 ? .medium : .low)
     }
 
+    static func remainingQuota(_ percent: Double) -> PressureLevel {
+        let displayed = percent.rounded()
+        return displayed <= 5 ? .high : displayed <= 20 ? .medium : .low
+    }
+
     static func memory(systemValue: Int32) throws -> PressureLevel {
         switch systemValue {
         case 1: return .low

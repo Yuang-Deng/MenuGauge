@@ -18,6 +18,7 @@ struct StatusPanelData {
     var chargeEnabled = false
     var chargeHint = "正在读取充电状态…"
     var temperature = "— °C"
+    var temperatureCelsius: Double?
     var temperatureHint = ""
     var cpu: Double?
     var memory: Double?
@@ -137,8 +138,10 @@ struct StatusPanelView: View {
     @ObservedObject var model: StatusPanelModel
     var agenda: CalendarAgenda
     var monitor: ModelMonitor
+    @ObservedObject var temperaturePreferences: TemperaturePreferences
     var onCharge: () -> Void
     var onQuit: () -> Void
+    @State private var showingTemperatureSettings = false
 
     var body: some View {
         let availableHeight = max(360, (NSScreen.main?.visibleFrame.height ?? 800) - 48)
@@ -153,13 +156,10 @@ struct StatusPanelView: View {
     private var panelContent: some View {
         let data = model.data
         let quotaPercent = data.quotaRemaining.map { Int($0.rounded()) }
-        let quotaTint = quotaPercent.map { percent in
-            switch percent {
-            case ...5: return PressureLevel.high.color
-            case ...20: return PressureLevel.medium.color
-            default: return PressureLevel.low.color
-            }
-        } ?? .secondary
+        let quotaTint = quotaPercent.map { PressureLevel.remainingQuota(Double($0)).color } ?? .secondary
+        let temperatureLevel = data.temperatureCelsius.map { temperaturePreferences.thresholds.level(for: $0) }
+        let temperatureTint = temperatureLevel == .high ? PressureLevel.high.color
+            : temperatureLevel == .medium ? PressureLevel.medium.color : Color.primary
         return VStack(alignment: .leading, spacing: 12) {
             VStack(spacing: 8) {
                 HStack {
@@ -189,7 +189,11 @@ struct StatusPanelView: View {
                     Text("性能").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                     Spacer()
                     Label(data.temperature, systemImage: "thermometer.medium")
-                        .font(.system(size: 12)).monospacedDigit().help(data.temperatureHint)
+                        .font(.system(size: 12)).monospacedDigit().foregroundStyle(temperatureTint).help(data.temperatureHint)
+                    Button { showingTemperatureSettings.toggle() } label: {
+                        Image(systemName: "slider.horizontal.3").font(.system(size: 11)).padding(3)
+                    }.buttonStyle(.plain).foregroundStyle(showingTemperatureSettings ? Color.accentColor : Color.secondary)
+                        .accessibilityLabel("温度颜色设置").help("设置菜单栏温度变黄、变红的阈值")
                 }
                 HStack(alignment: .top, spacing: 4) {
                     PressureGauge(name: "CPU", percent: data.cpu, level: data.cpu.map(PressureLevel.cpu),
@@ -206,6 +210,10 @@ struct StatusPanelView: View {
                                       String(format: "%.0f / %.0f GB", Double($0.usedBytes) / 1_000_000_000,
                                              Double($0.totalBytes) / 1_000_000_000)
                                   } ?? "— / — GB", hint: data.diskHint)
+                }
+                if showingTemperatureSettings { temperatureSettings }
+                if let error = temperaturePreferences.error {
+                    Text(error).font(.system(size: 11)).foregroundStyle(.red)
                 }
             }
             Divider()
@@ -249,5 +257,23 @@ struct StatusPanelView: View {
         .frame(width: 336)
         .fixedSize(horizontal: false, vertical: true)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var temperatureSettings: some View {
+        let thresholds = temperaturePreferences.thresholds
+        return VStack(spacing: 8) {
+            Stepper(value: Binding(get: { temperaturePreferences.thresholds.warning }, set: temperaturePreferences.setWarning),
+                    in: 30...(thresholds.critical - 1)) {
+                HStack { Text("黄色阈值"); Spacer(); Text("\(thresholds.warning)°C").monospacedDigit() }
+            }.accessibilityLabel("黄色阈值")
+            Stepper(value: Binding(get: { temperaturePreferences.thresholds.critical }, set: temperaturePreferences.setCritical),
+                    in: (thresholds.warning + 1)...110) {
+                HStack { Text("红色阈值"); Spacer(); Text("\(thresholds.critical)°C").monospacedDigit() }
+            }.accessibilityLabel("红色阈值")
+            Text("低于黄色阈值显示原生黑白色，达到红色阈值显示红色。")
+                .font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.system(size: 12)).padding(10)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
     }
 }

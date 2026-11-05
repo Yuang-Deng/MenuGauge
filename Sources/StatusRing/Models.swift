@@ -3,14 +3,6 @@ import Foundation
 enum PowerMode: String {
     case charging, pluggedIn, battery
 
-    var symbol: String? {
-        switch self {
-        case .charging: return "bolt.fill"
-        case .pluggedIn: return "powerplug.fill"
-        case .battery: return nil
-        }
-    }
-
     var label: String {
         switch self {
         case .charging: return "正在充电"
