@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="case" x2="0.86" y2="1">
+      <stop stop-color="#21536A"/>
+      <stop offset="0.54" stop-color="#13354C"/>
+      <stop offset="1" stop-color="#091B30"/>
+    </linearGradient>
+    <linearGradient id="rim" x2="0" y2="1">
+      <stop stop-color="#C5F4FF" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#071526" stop-opacity="0.6"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0.09" y1="0.88" x2="0.86" y2="0.13">
+      <stop stop-color="#30D5B2"/>
+      <stop offset="1" stop-color="#9BF4FF"/>
+    </linearGradient>
+    <linearGradient id="needle" gradientUnits="userSpaceOnUse" x1="0" y1="369" x2="0" y2="563">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D0F3FF"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="126%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#061323" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+
+  <rect x="100" y="88" width="824" height="824" rx="184" fill="url(#case)" filter="url(#shadow)"/>
+  <rect x="104" y="92" width="816" height="816" rx="180" fill="none" stroke="url(#rim)" stroke-width="8"/>
+
+  <g fill="none" stroke-width="76" stroke-linecap="round">
+    <path d="M 336 684 A 249 249 0 1 1 688 684" stroke="#C2F1FF" stroke-opacity="0.20"/>
+    <path d="M 336 684 A 249 249 0 1 1 760 473" stroke="url(#ring)"/>
+  </g>
+
+  <path d="M 477 463 L 633 373 Q 649 364 644 383 L 551 540 Z" fill="url(#needle)"/>
+  <circle cx="512" cy="508" r="55" fill="url(#needle)"/>
+</svg>
