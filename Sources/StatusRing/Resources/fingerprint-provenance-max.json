@@ -1,0 +1,51 @@
+{
+  "modeltraceCommit": "6cd4a8ff0f3f4e49d6d6969dd2fbadfa1569fde2",
+  "effort": "max",
+  "builtAt": "2026-11-05T12:37:48.735865+00:00",
+  "calibration": {
+    "1": {
+      "beta": 5.925555206726568,
+      "cv_accuracy": 0.9208333333333333,
+      "cv_correct": 663,
+      "cv_samples": 720,
+      "cv_nll": 0.2635723000557414,
+      "fallback": false
+    },
+    "2": {
+      "beta": 8.696486669802708,
+      "cv_accuracy": 0.9583333333333334,
+      "cv_correct": 690,
+      "cv_samples": 720,
+      "cv_nll": 0.10012396515446399,
+      "fallback": false
+    },
+    "3": {
+      "beta": 8.816462481324539,
+      "cv_accuracy": 0.9625,
+      "cv_correct": 231,
+      "cv_samples": 240,
+      "cv_nll": 0.07575976818110783,
+      "fallback": false
+    }
+  },
+  "profiles": [
+    {
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "experimental": true,
+      "samples": 36,
+      "validationCorrect": 4,
+      "validationTotal": 4,
+      "source": "Codex 订阅线路，openai 提供方，max 推理。12 份独立回答，按每组三份验证。仅为统计参考，不能证明实际模型权重。"
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "effort": "max",
+      "experimental": true,
+      "samples": 36,
+      "validationCorrect": 4,
+      "validationTotal": 4,
+      "source": "Codex 订阅线路，openai 提供方，max 推理。12 份独立回答，按每组三份验证。仅为统计参考，不能证明实际模型权重。"
+    }
+  ]
+}

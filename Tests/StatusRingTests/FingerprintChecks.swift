@@ -4,11 +4,15 @@ enum FingerprintChecks {
     static func run() throws {
         struct Fixture: Decodable { let outputs: [String]; let prediction: String; let probabilities: [String: Double] }
         let bank = try FingerprintBank.load()
-        let fixtures = try JSONDecoder().decode([Fixture].self, from: Data(contentsOf: URL(fileURLWithPath: "Tests/Fixtures/model-fingerprint-parity.json")))
-        for fixture in fixtures {
-            let analysis = try bank.analyze(fixture.outputs, expectedCount: 0)
-            assert(analysis.candidates[0].model == fixture.prediction)
-            for candidate in analysis.candidates { assert(abs(candidate.probability - fixture.probabilities[candidate.model]!) < 1e-9) }
+        for suffix in ["", "-max"] {
+            let currentBank = try FingerprintBank.load(url: ModelResources.url("model-fingerprints" + suffix))
+            assert(currentBank.reasoningEffort == (suffix.isEmpty ? "low" : "max"))
+            let fixtures = try JSONDecoder().decode([Fixture].self, from: Data(contentsOf: URL(fileURLWithPath: "Tests/Fixtures/model-fingerprint-parity" + suffix + ".json")))
+            for fixture in fixtures {
+                let analysis = try currentBank.analyze(fixture.outputs, expectedCount: 0)
+                assert(analysis.candidates[0].model == fixture.prediction)
+                for candidate in analysis.candidates { assert(abs(candidate.probability - fixture.probabilities[candidate.model]!) < 1e-9) }
+            }
         }
         do { _ = try bank.analyze(["I cannot provide that."]); assertionFailure("Refusals cannot produce a fingerprint verdict") } catch {}
         assert(FingerprintBank.parse("1,2,3 explanation 4,5") == [1,2,3])

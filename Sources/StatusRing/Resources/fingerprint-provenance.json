@@ -1,29 +1,30 @@
 {
   "modeltraceCommit": "6cd4a8ff0f3f4e49d6d6969dd2fbadfa1569fde2",
-  "builtAt": "2026-11-05T10:29:30.489962+00:00",
+  "effort": "low",
+  "builtAt": "2026-11-05T12:12:16.372870+00:00",
   "calibration": {
     "1": {
       "beta": 6.522029298188182,
-      "cv_accuracy": 0.9254385964912281,
-      "cv_correct": 633,
-      "cv_samples": 684,
-      "cv_nll": 0.22696257493972413,
+      "cv_accuracy": 0.9208333333333333,
+      "cv_correct": 663,
+      "cv_samples": 720,
+      "cv_nll": 0.23431361039765963,
       "fallback": false
     },
     "2": {
-      "beta": 10.04209627479123,
-      "cv_accuracy": 0.9634502923976608,
-      "cv_correct": 659,
-      "cv_samples": 684,
-      "cv_nll": 0.08707182627163271,
+      "beta": 9.905441845364404,
+      "cv_accuracy": 0.9625,
+      "cv_correct": 693,
+      "cv_samples": 720,
+      "cv_nll": 0.08560603330334333,
       "fallback": false
     },
     "3": {
-      "beta": 10.321086952854024,
-      "cv_accuracy": 0.9736842105263158,
-      "cv_correct": 222,
-      "cv_samples": 228,
-      "cv_nll": 0.06919284699619405,
+      "beta": 10.180635974292155,
+      "cv_accuracy": 0.975,
+      "cv_correct": 234,
+      "cv_samples": 240,
+      "cv_nll": 0.06601308681369703,
       "fallback": false
     }
   },
@@ -35,7 +36,16 @@
       "samples": 36,
       "validationCorrect": 3,
       "validationTotal": 4,
-      "source": "Codex \u8ba2\u9605\u7ebf\u8def\uff0copenai \u63d0\u4f9b\u65b9\uff0cLow \u63a8\u7406\u300212 \u4efd\u72ec\u7acb\u56de\u7b54\uff0c\u6309\u6bcf\u7ec4\u4e09\u4efd\u9a8c\u8bc1\u3002\u4ec5\u4e3a\u7edf\u8ba1\u53c2\u8003\uff0c\u4e0d\u80fd\u8bc1\u660e\u5b9e\u9645\u6a21\u578b\u6743\u91cd\u3002"
+      "source": "Codex 订阅线路，openai 提供方，low 推理。12 份独立回答，按每组三份验证。仅为统计参考，不能证明实际模型权重。"
+    },
+    {
+      "model": "gpt-6.1-terra",
+      "effort": "low",
+      "experimental": true,
+      "samples": 36,
+      "validationCorrect": 3,
+      "validationTotal": 4,
+      "source": "Codex 订阅线路，openai 提供方，low 推理。12 份独立回答，按每组三份验证。仅为统计参考，不能证明实际模型权重。"
     }
   ]
 }

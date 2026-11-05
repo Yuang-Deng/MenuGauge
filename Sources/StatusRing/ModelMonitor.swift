@@ -29,6 +29,7 @@ final class ModelMonitor: ObservableObject {
     @Published private(set) var validationCounts: [String: Int] = [:]
     @Published var selectedID: String?
     private(set) var bank: FingerprintBank?
+    private(set) var maxBank: FingerprintBank?
     private(set) var profiles: [FingerprintProfile] = []
     private let queue = DispatchQueue(label: "local.dya.MenuGauge.model-checks", qos: .utility)
     private let reader = IntegrityReader()
@@ -37,23 +38,31 @@ final class ModelMonitor: ObservableObject {
 
     init() {
         do {
-            bank = try FingerprintBank.load()
+            let primaryBank = try FingerprintBank.load()
+            let maximumBank = try FingerprintBank.load(url: ModelResources.url("model-fingerprints-max"))
+            guard primaryBank.reasoningEffort == "low", maximumBank.reasoningEffort == "max" else {
+                throw MetricError(message: "指纹库与推理级别不一致")
+            }
             profiles = try JSONDecoder().decode([FingerprintProfile].self, from: Data(contentsOf: ModelResources.url("fingerprint-profiles")))
             records = try ModelCheckStorage.load([ProbeRecord].self, name: "results.json") ?? []
             for model in Self.newModels {
                 baselineCounts[model] = try ModelCheckStorage.load([BaselineSample].self, name: model + "-samples.json")?.count ?? 0
                 validationCounts[model] = try ModelCheckStorage.load([BaselineSample].self, name: model + "-validation.json")?.count ?? 0
             }
+            bank = primaryBank
+            maxBank = maximumBank
         } catch { self.error = "模型检测初始化失败：" + error.localizedDescription }
     }
 
     static let newModels = ["gpt-6.1-sol", "gpt-6.1-terra"]
     var selected: IntegritySession? { snapshot?.sessions.first { $0.id == selectedID } }
     var record: ProbeRecord? { records.first { $0.threadID == selectedID } }
-    func experimental(_ model: String) -> Bool { profiles.first { $0.model == model }?.experimental == true }
+    func experimental(_ model: String) -> Bool { profiles.contains { $0.model == model && $0.experimental } }
+    func profile(_ model: String, effort: String) -> FingerprintProfile? { profiles.first { $0.model == model && $0.effort == effort } }
+    func bank(for effort: String) -> FingerprintBank? { effort == "max" ? maxBank : bank }
     func enrolled(_ model: String) -> Bool { bank?.models.contains { $0.id == model } == true }
     var currentRecord: ProbeRecord? {
-        guard let selected, let record, record.bankBuiltAt == bank?.builtAt,
+        guard let selected, let record, record.bankBuiltAt == bank(for: record.effort)?.builtAt,
               record.isCurrent(session: selected, account: snapshot?.accountHash) else { return nil }
         return record
     }
@@ -63,8 +72,8 @@ final class ModelMonitor: ObservableObject {
         if refreshing { return "正在读取会话…" }
         if let error { return error.contains("取消") ? "检测已停止" : "检测不可用" }
         guard let selected else { return snapshot == nil ? "正在读取…" : "暂无近期会话" }
-        if let record = currentRecord, let bank {
-            if let profile = profiles.first(where: { $0.model == record.model }), profile.effort != record.effort {
+        if let record = currentRecord, let bank = bank(for: record.effort) {
+            if experimental(record.model), profile(record.model, effort: record.effort) == nil {
                 return "实验结果待验证"
             }
             return record.verdict(experimental: experimental(record.model), bank: bank)
@@ -132,7 +141,7 @@ final class ModelMonitor: ObservableObject {
 
     func probe() {
         guard operation == nil, !refreshing, let session = selected, let model = session.model,
-              let effort = session.effort, let account = snapshot?.accountHash, let bank, enrolled(model) else { return }
+              let effort = session.effort, let account = snapshot?.accountHash, let bank = bank(for: effort), enrolled(model) else { return }
         let server = CodexAppServer()
         self.server = server; error = nil
         operation = Operation(model: model, sessionID: session.id, total: 3, completed: 0)

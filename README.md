@@ -8,7 +8,7 @@ MenuGauge 是一个原生 macOS 菜单栏小工具。扫一眼能看电量、CPU
 
 ## 下载试用
 
-在 [v0.2.1 Release](https://github.com/Yuang-Deng/MenuGauge/releases/tag/v0.2.1) 下载 `MenuGauge-0.2.1-arm64-preview.zip`。这是 Apple 芯片 Mac 的预览包，解压后把 MenuGauge 拖进「应用程序」再打开。
+在 [v0.3.0 Release](https://github.com/Yuang-Deng/MenuGauge/releases/tag/v0.3.0) 下载 `MenuGauge-0.3.0-arm64-preview.zip`。这是 Apple 芯片 Mac 的预览包，解压后把 MenuGauge 拖进「应用程序」再打开。
 
 预览包尚未经过 Apple 公证。如果第一次打开时 macOS 提示无法验证开发者，确认文件来自本仓库后，可在「系统设置 → 隐私与安全性」为 MenuGauge 选择「仍要打开」。也可以按下文在本机从源码构建。 [Apple 打开下载应用的说明](https://support.apple.com/zh-cn/102445)
 
@@ -41,7 +41,7 @@ open 'dist/MenuGauge.app'
 - 面板底部显示周历。点「连接日历」并授权后，日期下方的圆点表示有安排，点击日期查看当天的时间和标题。日程直接读取 Mac「日历」App 已同步的事件，在本机显示。
 - Codex 额度下方提供折叠的模型检测摘要，点击可看日志、指纹结果、结果时间，并切换最近 48 小时内的会话。面板打开时每 15 秒读取会话并增量检查本地日志；设置变化可能来自用户操作，不能单凭变化认定降配。
 - 「检测」由用户手动发起，创建三个临时会话副本，沿用原会话的模型和推理级别生成数字并在本机评分，会使用 Codex 额度。原会话不会被追加探测消息，临时副本不出现在持久会话列表。探测进程关闭 Hooks、Shell 和网页搜索，拒绝授权请求；检测到工具尝试、超时或无有效回答时停止并说明原因，可点「停止」。Ultra 推理暂不支持。结果超过 30 分钟、账户或会话模型设置变化后标记过期。
-- 「模型库」展示 6.1 Sol、6.1 Terra 的实验基线状态。缺少基线时可采集最多 36 份参考回答，支持停止后继续；采集后需另行完成校准和独立验证。实验基线的推理级别、参考规模、验证数量及来源可在模型库中查看。当前 Sol 基线仅在 low 级别独立验证，其他级别显示「实验结果待验证」。指纹概率仅表示候选库内的统计归因，不能证明服务端实际加载的权重，也不是模型能力评分。
+- 「模型库」分别展示 6.1 Sol、6.1 Terra 在 low 和 max 级别的实验基线，每套包含 36 份参考与 12 份独立验证回答；验证按每组三份计数。检测沿用会话的推理级别选择对应指纹库，其他级别显示「实验结果待验证」。缺少基线时，应用内可采集最多 36 份 low 级别参考，支持停止后继续；采集后还需校准和独立验证。指纹概率仅表示候选库内的统计归因，不能证明服务端实际加载的权重，也不是模型能力评分。
 - 展开菜单将旗帜、本机地址和网速放在同一行，每秒更新，收起菜单后停止采样。地址优先显示 IPv4，否则显示 IPv6。旗帜由 [ipwho.is](https://ipwhois.io/documentation) 根据 HTTPS 请求的公网出口判断，结果缓存五分钟。查询中或失败时显示 🌐，悬停查看详细信息。网速通过系统 nettop 按进程计数差值估算，短暂建立并关闭的连接可能漏计。
 
 Codex 额度复用本机 Codex 桌面应用的登录状态，通过其内置程序的 `account/rateLimits/read` 接口读取，不复制认证凭据、不创建对话或调用模型。启动、每分钟以及唤醒后查询，查询结束退出子进程。仅使用 `codex` 额度桶；多周期取最低剩余比例，菜单分别显示周期与本地时间的重置时间。查询失败时保留旧数据并标记过期，右柱降低亮度；超过五分钟未成功更新或尚无数据时，右柱显示分段的未知标记。未登录、缺少程序等错误可在额度菜单项的提示中查看。需要安装 Codex/ChatGPT 桌面应用，应用升级改变内置程序位置时可能需要适配。[官方协议](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)。
@@ -50,17 +50,18 @@ CPU 温度是已识别的 CPU 传感器最高值。当前温度读取适配 Appl
 
 图标会依据菜单栏的深浅外观调整配色。不自动添加登录项，不采集音量，不更改风扇、网络或系统菜单栏设置；电池控制仅执行用户点击的临时充满请求，不修改充电上限配置。
 
-模型检测通过独立的 Codex app-server 连接运行，副本与桌面自身连接的服务端路由可能存在差异。新模型参考数据采自 Codex 订阅线路的 Low 推理设置，属于实验基线；有限样本上的校准或验证通过，不保证其他推理设置和未来模型版本的识别效果。应用使用 Swift 原生评分，运行时无需 Python 或额外插件。
+模型检测通过独立的 Codex app-server 连接运行，副本与桌面自身连接的服务端路由可能存在差异。两款 6.1 模型的参考数据采自 Codex 订阅线路，分别使用 low 和 max 推理设置；两套库均沿用其余候选模型的上游参考数据。有限样本上的校准或验证通过，不保证其他推理设置和未来模型版本的识别效果。应用使用 Swift 原生评分，运行时无需 Python 或额外插件。
 
 检测结果和自行采集的数字参考保存在 `~/Library/Application Support/MenuGauge/ModelChecks/`，账户信息仅保存哈希；MenuGauge 不读取或复制 `auth.json` 的认证凭据。会话日志在本机检查，主动探测通过本机 Codex 登录的账户请求推理，结果不会上传至本项目的服务器。
 
 维护指纹库时，使用第三方声明中固定版本的 ModelTrace 源码及参考数据，并在装有 NumPy 的开发环境运行：
 
 ```sh
-python scripts/calibrate-model-bank.py --modeltrace-dir /path/to/ModelTrace --samples /path/to/samples.json
+python scripts/calibrate-model-bank.py --modeltrace-dir /path/to/ModelTrace --effort low --samples /path/to/low-samples.json /path/to/low-validation.jsonl
+python scripts/calibrate-model-bank.py --modeltrace-dir /path/to/ModelTrace --effort max --samples /path/to/max-samples.json /path/to/max-validation.jsonl
 ```
 
-支持应用采集的 `*-samples.json`；两款新模型均需完整的 36 个挑战。独立验证记录可使用含 `kind: "validation"`、`source`、`challenge_id`、`expected_count`、`text` 的 JSONL 一并输入。采样文件仅在本机读取，脚本重建统计库和校准参数，并更新来源及 Swift 评分对照样本。
+支持应用采集的 `*-samples.json`；每款模型、每个推理级别均需完整的 36 个挑战。max 记录须标明 `reasoning_effort: "max"`，禁止混入其他级别数据。独立验证记录可使用含 `kind: "validation"`、`source`、`challenge_id`、`expected_count`、`text` 或 `numbers` 的 JSONL 一并输入。验证回答只用于评估，不参与参考库拟合。采样文件仅在本机读取，脚本分别重建对应级别的统计库和校准参数，更新来源、验证结果及 Swift 评分对照样本。
 
 ## 本地检查
 

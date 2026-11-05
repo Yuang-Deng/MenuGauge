@@ -76,8 +76,8 @@ struct ModelCheckView: View {
                     fact("库内归因", record.candidates.first.map { String(format: "%.0f%%", $0.probability * 100) } ?? "未知")
                     fact("有效回答", "\(record.validAnswers) / 3")
                     fact("结果时间", record.finishedAt.formatted(date: .numeric, time: .shortened))
-                    if let profile = monitor.profiles.first(where: { $0.model == record.model }), profile.effort != record.effort {
-                        Text("基线以 \(profile.effort) 级别验证，当前 \(record.effort) 级别尚未验证。")
+                    if monitor.experimental(record.model), monitor.profile(record.model, effort: record.effort) == nil {
+                        Text("当前 \(record.effort) 级别尚未独立验证。")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     if monitor.currentRecord == nil { Text("结果已过期、设置变更或来自其他账户，请重新检测。") .font(.system(size: 11)).foregroundStyle(.secondary) }
@@ -109,13 +109,14 @@ struct ModelCheckView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(model).font(.system(size: 12, weight: .medium))
-                        if let profile = monitor.profiles.first(where: { $0.model == model }) {
-                            Text("\(profile.effort) 级别 · \(profile.samples) 份参考")
-                                .font(.system(size: 11)).foregroundStyle(.secondary)
-                            Text(profile.validationTotal > 0
-                                 ? "独立验证 \(profile.validationCorrect)/\(profile.validationTotal) 组匹配"
-                                 : "待独立验证")
-                                .font(.system(size: 11)).foregroundStyle(.secondary).help(profile.source)
+                        let profiles = monitor.profiles.filter { $0.model == model }.sorted { $0.effort < $1.effort }
+                        if !profiles.isEmpty {
+                            ForEach(profiles, id: \.effort) { profile in
+                                Text(profile.validationTotal > 0
+                                     ? "\(profile.effort) · \(profile.samples)份参考 · 验证\(profile.validationCorrect)/\(profile.validationTotal)组匹配"
+                                     : "\(profile.effort) · \(profile.samples) 份参考 · 待独立验证")
+                                    .font(.system(size: 11)).foregroundStyle(.secondary).help(profile.source)
+                            }
                         } else if let count = monitor.baselineCounts[model], count > 0 {
                             Text(count >= 36 ? "36 份参考已采集 · 待校准验证" : "已采集 \(count) / 36 份")
                                 .font(.system(size: 11)).foregroundStyle(.secondary)

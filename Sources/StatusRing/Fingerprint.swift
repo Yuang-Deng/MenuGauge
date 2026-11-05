@@ -15,6 +15,7 @@ struct FingerprintBank: Decodable {
     struct Calibration: Decodable { let beta: Double; let cvAccuracy: Double?; let fallback: Bool }
     let models: [Model]
     let builtAt: String
+    let reasoningEffort: String
     let robust: Robust
     let calibration: [String: Calibration]
 
@@ -22,6 +23,7 @@ struct FingerprintBank: Decodable {
         let data = try Data(contentsOf: url ?? ModelResources.url("model-fingerprints"))
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         let bank = try decoder.decode(Self.self, from: data)
+        guard ["low", "max"].contains(bank.reasoningEffort) else { throw MetricError(message: "指纹库推理级别无效") }
         guard !bank.models.isEmpty, Set(bank.models.map(\.id)).count == bank.models.count else { throw MetricError(message: "指纹库模型清单无效") }
         for (artifact, dimension) in [(bank.robust.hellinger, 355), (bank.robust.orderedBlocks, 74)] {
             let vectors = artifact.nuisanceBasis + artifact.centroids + (artifact.environmentCentroids ?? []).flatMap { $0 }

@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--modeltrace-dir", type=Path, required=True)
     parser.add_argument("--samples", type=Path, nargs="+", required=True)
+    parser.add_argument("--effort", choices=("low", "max"), default="low")
     args = parser.parse_args()
     sys.path.insert(0, str(args.modeltrace_dir.resolve()))
     builder = importlib.import_module("bank_builder")
@@ -29,6 +30,9 @@ def main():
         content = path.read_text()
         records = json.loads(content) if content.lstrip().startswith("[") else [json.loads(x) for x in content.splitlines() if x.strip()]
         for record in records:
+            effort = record.get("reasoning_effort", record.get("effort"))
+            if effort != args.effort and not (effort is None and args.effort == "low"):
+                raise ValueError("Sample reasoning effort does not match the requested bank")
             model = record.get("model") or record.get("source")
             cid = record.get("challengeID") or record.get("challenge_id")
             kind = record.get("kind", "validation" if cid and cid.startswith("validation-") else "training")
@@ -51,18 +55,23 @@ def main():
     training = [row for row in training if row["source"] in ready]
     references = builder.read_rows(args.modeltrace_dir / "data/gpt_reference.jsonl") + builder.read_rows(args.modeltrace_dir / "data/claude_reference.jsonl")
     bank = builder.build_bank(references + training)
+    bank["reasoning_effort"] = args.effort
     if any(c["fallback"] for c in bank["calibration"].values()):
         raise ValueError("Cross-validation did not produce calibration parameters")
     profiles = []
     for model in ready:
         rows = sorted((r for r in validation if r["source"] == model), key=lambda r: r["challenge_id"])
         results = [fingerprint.analyze_global_outputs([{"text": r["text"], "expected_count": r["expected_count"]} for r in rows[start:start+3]], bank)["prediction"] for start in range(0, len(rows)-2, 3)]
-        profiles.append({"model": model, "effort": "low", "experimental": True, "samples": 36, "validationCorrect": results.count(model), "validationTotal": len(results),
-                         "source": f"Codex 订阅线路，openai 提供方，Low 推理。{len(rows)} 份独立回答，按每组三份验证。仅为统计参考，不能证明实际模型权重。"})
+        profiles.append({"model": model, "effort": args.effort, "experimental": True, "samples": 36, "validationCorrect": results.count(model), "validationTotal": len(results),
+                         "source": f"Codex 订阅线路，openai 提供方，{args.effort} 推理。{len(rows)} 份独立回答，按每组三份验证。仅为统计参考，不能证明实际模型权重。"})
     resources = ROOT / "Sources/StatusRing/Resources"
-    (resources / "model-fingerprints.json").write_text(json.dumps(bank, ensure_ascii=False, separators=(",", ":")))
-    (resources / "fingerprint-profiles.json").write_text(json.dumps(profiles, ensure_ascii=False, indent=2) + "\n")
-    (resources / "fingerprint-provenance.json").write_text(json.dumps({"modeltraceCommit": "6cd4a8ff0f3f4e49d6d6969dd2fbadfa1569fde2", "builtAt": bank["built_at"], "calibration": bank["calibration"], "profiles": profiles}, ensure_ascii=False, indent=2) + "\n")
+    suffix = "" if args.effort == "low" else "-max"
+    (resources / f"model-fingerprints{suffix}.json").write_text(json.dumps(bank, ensure_ascii=False, separators=(",", ":")))
+    profiles_path = resources / "fingerprint-profiles.json"
+    other_profiles = [profile for profile in json.loads(profiles_path.read_text()) if profile["effort"] != args.effort] if profiles_path.exists() else []
+    all_profiles = sorted(other_profiles + profiles, key=lambda profile: (profile["model"], profile["effort"]))
+    profiles_path.write_text(json.dumps(all_profiles, ensure_ascii=False, indent=2) + "\n")
+    (resources / f"fingerprint-provenance{suffix}.json").write_text(json.dumps({"modeltraceCommit": "6cd4a8ff0f3f4e49d6d6969dd2fbadfa1569fde2", "effort": args.effort, "builtAt": bank["built_at"], "calibration": bank["calibration"], "profiles": profiles}, ensure_ascii=False, indent=2) + "\n")
     fixtures = []
     for model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna") + MODELS:
         pool = validation if model in MODELS else references
@@ -72,8 +81,8 @@ def main():
         outputs = [{"text": json.dumps(r["numbers"]), "expected_count": 0} for r in cases]
         result = fingerprint.analyze_global_outputs(outputs, bank)
         fixtures.append({"outputs": [x["text"] for x in outputs], "prediction": result["prediction"], "probabilities": {r["model"]: r["probability"] for r in result["results"]}})
-    (ROOT / "Tests/Fixtures/model-fingerprint-parity.json").write_text(json.dumps(fixtures, separators=(",", ":")))
-    print(json.dumps({"models": len(bank["models"]), "profiles": profiles, "calibration": bank["calibration"]}, indent=2))
+    (ROOT / f"Tests/Fixtures/model-fingerprint-parity{suffix}.json").write_text(json.dumps(fixtures, separators=(",", ":")))
+    print(json.dumps({"effort": args.effort, "models": len(bank["models"]), "profiles": profiles, "calibration": bank["calibration"]}, indent=2))
 
 
 if __name__ == "__main__":
