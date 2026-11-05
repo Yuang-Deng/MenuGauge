@@ -6,6 +6,6 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [.executable(name: "StatusRing", targets: ["StatusRing"])],
     targets: [
-        .executableTarget(name: "StatusRing")
+        .executableTarget(name: "StatusRing", resources: [.copy("Resources")])
     ]
 )

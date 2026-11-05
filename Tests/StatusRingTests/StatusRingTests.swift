@@ -24,6 +24,8 @@ final class FakeChargingClient: NSObject, PowerUICharging {
 @main
 struct StatusRingTests {
     static func main() throws {
+        try FingerprintChecks.run()
+        try ModelRPCChecks.run()
         assert(PowerMode.charging.symbol == "bolt.fill")
         assert(PowerMode.pluggedIn.symbol == "powerplug.fill")
         assert(PowerMode.battery.symbol == nil)

@@ -41,6 +41,14 @@ struct StatusRingApp {
                     entry["resetsAt"] = window.resetsAt
                     return entry
                 }
+                do {
+                    let server = CodexAppServer(); defer { server.close() }
+                    try server.connect()
+                    let integrity = try IntegrityReader().read(server: server)
+                    result["modelCheckSessions"] = integrity.sessions.count
+                    result["modelCheckReadableLogs"] = integrity.sessions.filter { $0.logError == nil }.count
+                    result["fingerprintModels"] = try FingerprintBank.load().models.map(\.id)
+                } catch { result["modelCheckError"] = error.localizedDescription }
                 Thread.sleep(forTimeInterval: 0.5)
                 let usage = try resources.read()
                 result["cpuUsagePercent"] = usage.cpuPercent
@@ -74,7 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var item: NSStatusItem!
     private let panelModel = StatusPanelModel()
     @MainActor private lazy var agenda = CalendarAgenda()
+    @MainActor private lazy var modelMonitor = ModelMonitor()
     private let popover = NSPopover()
+    private var outsideClickMonitor: Any?
     private var temperatureReader: TemperatureReader?
     private var metricsTimer: Timer?
     private var resourceReader = ResourceReader()
@@ -123,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.animates = false
         popover.delegate = self
-        let host = NSHostingController(rootView: StatusPanelView(model: panelModel, agenda: agenda,
+        let host = NSHostingController(rootView: StatusPanelView(model: panelModel, agenda: agenda, monitor: modelMonitor,
             onCharge: { [weak self] in self?.chargeToFull() },
             onQuit: { [weak self] in self?.quitApp() }))
         host.sizingOptions = [.preferredContentSize]
@@ -171,13 +181,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            NSApplication.shared.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
     }
 
+    func applicationDidResignActive(_ notification: Notification) {
+        if popover.isShown { popover.performClose(nil) }
+    }
+
     func popoverWillShow(_ notification: Notification) {
         agenda.open()
+        modelMonitor.open()
         refreshDisk()
         refreshBattery()
         refreshBatteryHealth()
@@ -208,8 +224,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    func popoverDidShow(_ notification: Notification) {
+        // A status-item popover can remain visible while another app is active;
+        // transient behavior alone does not reliably dismiss it on outside clicks.
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            guard let self, self.popover.isShown else { return }
+            if let button = self.item.button, let window = button.window,
+               window.convertToScreen(button.convert(button.bounds, to: nil)).contains(NSEvent.mouseLocation) {
+                // The status button already toggles the popover in its action.
+                return
+            }
+            self.popover.performClose(nil)
+        }
+    }
+
+    private func removeOutsideClickMonitor() {
+        if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        outsideClickMonitor = nil
+    }
+
     func popoverDidClose(_ notification: Notification) {
+        removeOutsideClickMonitor()
         agenda.close()
+        modelMonitor.close()
         networkTimer?.invalidate()
         networkTimer = nil
         networkReader = nil
@@ -523,8 +560,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         terminating = true
+        removeOutsideClickMonitor()
         quotaTimer?.invalidate()
         quotaReader?.cancel()
+        modelMonitor.stop()
         metricsTimer?.invalidate()
         if let powerSource { CFRunLoopSourceInvalidate(powerSource) }
         networkTimer?.invalidate()

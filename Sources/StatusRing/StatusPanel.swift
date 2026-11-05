@@ -136,10 +136,21 @@ private struct PressureGauge: View {
 struct StatusPanelView: View {
     @ObservedObject var model: StatusPanelModel
     var agenda: CalendarAgenda
+    var monitor: ModelMonitor
     var onCharge: () -> Void
     var onQuit: () -> Void
 
     var body: some View {
+        let availableHeight = max(360, (NSScreen.main?.visibleFrame.height ?? 800) - 48)
+        ViewThatFits(in: .vertical) {
+            panelContent
+            ScrollView { panelContent }.frame(height: availableHeight)
+        }
+        .frame(width: 336)
+        .frame(maxHeight: availableHeight)
+    }
+
+    private var panelContent: some View {
         let data = model.data
         let quotaPercent = data.quotaRemaining.map { Int($0.rounded()) }
         let quotaTint = quotaPercent.map { percent in
@@ -149,7 +160,7 @@ struct StatusPanelView: View {
             default: return PressureLevel.low.color
             }
         } ?? .secondary
-        VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 12) {
             VStack(spacing: 8) {
                 HStack {
                     Label("电池", systemImage: data.batterySymbol).fontWeight(.semibold)
@@ -211,12 +222,13 @@ struct StatusPanelView: View {
                     }
                 }
                 UsageBar(fraction: data.quotaRemaining.map { $0 / 100 },
-                         tint: quotaTint.opacity(data.quotaStale ? 0.4 : 1), label: "Codex 剩余额度", height: 4)
+                         tint: quotaTint.opacity(data.quotaStale ? 0.4 : 1), label: "Codex 剩余额度", height: 4).help(data.quotaHint)
                 ForEach(data.quotaDetails) { detail in
                     HStack { Text(detail.window); Spacer(); Text(detail.reset) }
                         .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
                 }
-            }.help(data.quotaHint)
+                ModelCheckView(monitor: monitor)
+            }
             Divider()
             HStack(spacing: 6) {
                 Text(data.networkAddress).lineLimit(1).truncationMode(.middle)
