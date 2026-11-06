@@ -46,7 +46,7 @@ final class CodexAppServer: @unchecked Sendable {
             lock.unlock()
         } catch { lock.unlock(); throw error }
         do {
-            _ = try request("initialize", params: ["clientInfo": ["name": "menugauge", "title": "MenuGauge", "version": "0.3.0"],
+            _ = try request("initialize", params: ["clientInfo": ["name": "menugauge", "title": "MenuGauge", "version": "0.3.1"],
                                                  "capabilities": ["experimentalApi": true]], timeout: timeout)
             try send(["method": "initialized"])
         } catch { close(); throw error }

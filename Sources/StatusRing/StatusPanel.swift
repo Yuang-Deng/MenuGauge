@@ -29,7 +29,6 @@ struct StatusPanelData {
     var disk: DiskReading?
     var diskHint = ""
     var quotaRemaining: Double?
-    var quotaStale = false
     var quotaMessage = "正在读取…"
     var quotaHint = ""
     var quotaDetails: [QuotaDetail] = []
@@ -223,14 +222,14 @@ struct StatusPanelView: View {
                     Spacer()
                     if let quotaPercent {
                         Text("\(quotaPercent)%").fontWeight(.semibold).monospacedDigit()
-                            .foregroundStyle(quotaPercent == 0 && !data.quotaStale ? quotaTint : Color.primary)
-                        Text(data.quotaStale ? "已过期" : "剩余").font(.system(size: 12)).foregroundStyle(.secondary)
+                            .foregroundStyle(quotaPercent == 0 ? quotaTint : Color.primary)
+                        Text("剩余").font(.system(size: 12)).foregroundStyle(.secondary)
                     } else {
                         Text(data.quotaMessage).font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
                 UsageBar(fraction: data.quotaRemaining.map { $0 / 100 },
-                         tint: quotaTint.opacity(data.quotaStale ? 0.4 : 1), label: "Codex 剩余额度", height: 4).help(data.quotaHint)
+                         tint: quotaTint, label: "Codex 剩余额度", height: 4).help(data.quotaHint)
                 ForEach(data.quotaDetails) { detail in
                     HStack { Text(detail.window); Spacer(); Text(detail.reset) }
                         .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()

@@ -15,18 +15,14 @@ struct FingerprintProfile: Decodable {
 final class ModelMonitor: ObservableObject {
     struct Operation {
         let model: String
-        let sessionID: String?
         let total: Int
         var completed: Int
-        var isEnrollment: Bool { sessionID == nil }
     }
     @Published private(set) var snapshot: IntegritySnapshot?
     @Published private(set) var records: [ProbeRecord] = []
     @Published private(set) var operation: Operation?
     @Published private(set) var error: String?
     @Published private(set) var refreshing = false
-    @Published private(set) var baselineCounts: [String: Int] = [:]
-    @Published private(set) var validationCounts: [String: Int] = [:]
     @Published var selectedID: String?
     private(set) var bank: FingerprintBank?
     private(set) var maxBank: FingerprintBank?
@@ -45,16 +41,11 @@ final class ModelMonitor: ObservableObject {
             }
             profiles = try JSONDecoder().decode([FingerprintProfile].self, from: Data(contentsOf: ModelResources.url("fingerprint-profiles")))
             records = try ModelCheckStorage.load([ProbeRecord].self, name: "results.json") ?? []
-            for model in Self.newModels {
-                baselineCounts[model] = try ModelCheckStorage.load([BaselineSample].self, name: model + "-samples.json")?.count ?? 0
-                validationCounts[model] = try ModelCheckStorage.load([BaselineSample].self, name: model + "-validation.json")?.count ?? 0
-            }
             bank = primaryBank
             maxBank = maximumBank
         } catch { self.error = "模型检测初始化失败：" + error.localizedDescription }
     }
 
-    static let newModels = ["gpt-6.1-sol", "gpt-6.1-terra"]
     var selected: IntegritySession? { snapshot?.sessions.first { $0.id == selectedID } }
     var record: ProbeRecord? { records.first { $0.threadID == selectedID } }
     func experimental(_ model: String) -> Bool { profiles.contains { $0.model == model && $0.experimental } }
@@ -68,8 +59,8 @@ final class ModelMonitor: ObservableObject {
     }
 
     var label: String {
-        if let operation { return operation.isEnrollment ? "正在采集基线…" : "正在检测…" }
-        if refreshing { return "正在读取会话…" }
+        if operation != nil { return "正在检测…" }
+        if refreshing && snapshot == nil { return "正在读取会话…" }
         if let error { return error.contains("取消") ? "检测已停止" : "检测不可用" }
         guard let selected else { return snapshot == nil ? "正在读取…" : "暂无近期会话" }
         if let record = currentRecord, let bank = bank(for: record.effort) {
@@ -83,7 +74,7 @@ final class ModelMonitor: ObservableObject {
         return selected.logError == nil ? "尚未做指纹检测" : "日志不可用"
     }
     var tint: Color {
-        if operation != nil || refreshing { return Color(nsColor: .systemBlue) }
+        if operation != nil || (refreshing && snapshot == nil) { return Color(nsColor: .systemBlue) }
         if error != nil { return .secondary }
         switch label {
         case "指纹一致": return Color(nsColor: .systemGreen)
@@ -144,7 +135,7 @@ final class ModelMonitor: ObservableObject {
               let effort = session.effort, let account = snapshot?.accountHash, let bank = bank(for: effort), enrolled(model) else { return }
         let server = CodexAppServer()
         self.server = server; error = nil
-        operation = Operation(model: model, sessionID: session.id, total: 3, completed: 0)
+        operation = Operation(model: model, total: 3, completed: 0)
         queue.async { [weak self] in
             let result = Result { () -> ProbeRecord in
                 defer { server.close() }
@@ -183,51 +174,4 @@ final class ModelMonitor: ObservableObject {
         }
     }
 
-    func enroll(_ model: String) {
-        guard operation == nil, !refreshing, Self.newModels.contains(model), let account = snapshot?.accountHash else { return }
-        let server = CodexAppServer()
-        self.server = server; error = nil
-        operation = Operation(model: model, sessionID: nil, total: 36, completed: baselineCounts[model] ?? 0)
-        queue.async { [weak self] in
-            let result = Result { () -> Int in
-                defer { server.close() }
-                let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
-                let challenges = try decoder.decode([EnrollmentChallenge].self, from: Data(contentsOf: ModelResources.url("enrollment-challenges")))
-                var samples = try ModelCheckStorage.load([BaselineSample].self, name: model + "-samples.json") ?? []
-                guard samples.allSatisfy({ $0.model == model && $0.accountHash == account }) else {
-                    throw MetricError(message: "已有样本来自其他账户，请使用原账户继续采集")
-                }
-                try server.connect()
-                let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("MenuGauge-Probes", isDirectory: true)
-                try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-                for challenge in challenges where !samples.contains(where: { $0.challengeID == challenge.challengeId }) {
-                    guard try IntegrityReader.account(server) == account else { throw MetricError(message: "账户已切换，采样已停止") }
-                    try IntegrityReader.checkQuota(server)
-                    let response = try server.request("thread/start", params: ["ephemeral": true, "model": model, "modelProvider": "openai",
-                        "allowProviderModelFallback": false, "cwd": workspace.path, "approvalPolicy": "never", "sandbox": "read-only",
-                        "dynamicTools": [], "environments": [], "developerInstructions": challenge.system,
-                        "config": ["model_reasoning_effort": "low"]], timeout: 45)
-                    guard let thread = response["thread"] as? [String: Any], let id = thread["id"] as? String,
-                          thread["ephemeral"] as? Bool == true, response["model"] as? String == model,
-                          response["modelProvider"] as? String == "openai" else { throw MetricError(message: "采样模型与请求不一致") }
-                    let text = try server.answer(threadID: id, prompt: challenge.input, effort: "low")
-                    let numbers = FingerprintBank.parse(text)
-                    guard numbers.count >= max(80, Int(ceil(Double(challenge.expectedCount) * 0.55))) else { throw MetricError(message: "数字回答不完整，采样已停止，可稍后继续") }
-                    samples.append(BaselineSample(model: model, challengeID: challenge.challengeId, accountHash: account, numbers: numbers, capturedAt: Date()))
-                    try ModelCheckStorage.save(samples, name: model + "-samples.json")
-                    let count = samples.count
-                    DispatchQueue.main.async { [weak self] in self?.operation?.completed = count; self?.baselineCounts[model] = count }
-                }
-                return samples.count
-            }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.operation = nil; self.server = nil
-                switch result {
-                case .success(let count): self.baselineCounts[model] = count
-                case .failure(let error): self.error = error.localizedDescription
-                }
-            }
-        }
-    }
 }

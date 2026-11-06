@@ -510,14 +510,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         data.disk = disk
         data.diskHint = diskError ?? "启动磁盘空间（APFS 共享容器），不将可清理空间算作空闲。"
         data.quotaRemaining = quota?.remainingPercent
-        data.quotaStale = quotaError != nil || (quota?.isStale() ?? false)
         data.quotaMessage = quotaError == nil ? "正在读取…" : "额度不可用"
-        data.quotaHint = quotaError ?? ""
+        data.quotaHint = quotaError.map { "额度读取失败：" + $0 } ?? ""
         if let quota {
             let formatter = DateFormatter()
-            formatter.dateFormat = "HH:mm"
-            data.quotaHint = "更新于 " + formatter.string(from: quota.fetchedAt)
-                + (quotaError.map { "\n" + $0 } ?? "")
+            formatter.dateFormat = Calendar.current.isDateInToday(quota.fetchedAt) ? "HH:mm" : "MM/dd HH:mm"
+            data.quotaHint = "额度读取于 " + formatter.string(from: quota.fetchedAt)
+            if let quotaError {
+                data.quotaHint += "\n刷新失败：" + quotaError + "\n当前显示上次成功读取的额度"
+            } else if quota.isStale() {
+                data.quotaHint += "\n当前显示上次成功读取的额度，等待刷新"
+            }
             data.quotaDetails = quota.windows.enumerated().map { index, window in
                 var resetText = ""
                 if let reset = window.resetsAt {
@@ -548,18 +551,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func updateDisplay() {
         guard let button = item?.button else { return }
         let size = max(18, NSStatusBar.system.thickness)
-        let stale = quotaError != nil || (quota?.isStale() ?? false)
-        let fraction = quota.flatMap { Date().timeIntervalSince($0.fetchedAt) <= 300 ? $0.remainingPercent / 100 : nil }
+        let fraction = quota.map { $0.remainingPercent / 100 }
         button.image = RingRenderer.image(size: size, battery: battery, temperature: temperature,
-                                          quotaFraction: fraction, quotaStale: stale,
+                                          quotaFraction: fraction,
                                           thresholds: temperaturePreferences.thresholds, appearance: button.effectiveAppearance)
         updatePanel()
         let data = panelModel.data
         let description = ["电量 " + data.batteryText, data.powerText, "CPU " + data.temperature,
                            data.cpu.map { String(format: "CPU 使用率 %.0f%%", $0) } ?? "CPU 使用率未知",
                            data.memory.map { String(format: "内存使用率 %.0f%%", $0) } ?? "内存使用率未知",
-                           data.quotaRemaining.map { String(format: "Codex 剩余 %.0f%%", $0) } ?? "Codex 额度未知"]
-            .joined(separator: "\n")
+                           data.quotaRemaining.map { String(format: "Codex 剩余 %.0f%%", $0) } ?? "Codex 额度未知",
+                           data.quotaHint]
+            .filter { !$0.isEmpty }.joined(separator: "\n")
         button.toolTip = description
         button.setAccessibilityLabel("MenuGauge，" + description.replacingOccurrences(of: "\n", with: "，"))
     }

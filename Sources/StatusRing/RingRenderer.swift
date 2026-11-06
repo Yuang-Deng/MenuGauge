@@ -2,7 +2,7 @@ import AppKit
 
 enum RingRenderer {
     static func image(size: CGFloat, battery: BatteryReading?, temperature: Double?,
-                      quotaFraction: Double? = nil, quotaStale: Bool = false,
+                      quotaFraction: Double? = nil,
                       thresholds: TemperatureThresholds, appearance: NSAppearance) -> NSImage {
         let scale = size / 22
         let palette = Palette(appearance: appearance)
@@ -12,8 +12,7 @@ enum RingRenderer {
         else if battery?.mode == .pluggedIn { batteryColor = palette.blue }
         else { batteryColor = palette.neutral }
         let temperatureColor = temperature.map { palette.color(thresholds.level(for: $0), normal: palette.neutral) } ?? palette.neutral
-        let quotaColor = quotaStale ? palette.neutral.withAlphaComponent(0.5)
-            : quotaFraction.map { palette.color(.remainingQuota($0 * 100), normal: palette.green) } ?? palette.neutral
+        let quotaColor = quotaFraction.map { palette.color(.remainingQuota($0 * 100), normal: palette.green) } ?? palette.neutral
         let image = NSImage(size: NSSize(width: 38 * scale, height: size), flipped: false) { _ in
             let context = NSGraphicsContext.current!.cgContext
             context.saveGState()
