@@ -3,6 +3,9 @@ import SwiftUI
 
 struct WeekAgendaView: View {
     @ObservedObject var model: CalendarAgenda
+    let holiday: HolidayCountdown?
+    let showingHolidays: Bool
+    let onToggleHolidays: () -> Void
     private let weekdays = ["一", "二", "三", "四", "五", "六", "日"]
     private let blue = Color(nsColor: .systemBlue)
 
@@ -22,6 +25,7 @@ struct WeekAgendaView: View {
                     .disabled(calendar.isDateInToday(selected))
                 weekArrow("chevron.right", label: "下周", offset: 1)
             }
+            holidayRow
             HStack(spacing: 2) {
                 ForEach(Array(week.days.enumerated()), id: \.element) { index, date in
                     let day = calendar.dateInterval(of: .day, for: date)!
@@ -32,6 +36,43 @@ struct WeekAgendaView: View {
             Divider()
             agenda(for: calendar.dateInterval(of: .day, for: selected)!, calendar: calendar, events: events)
         }
+    }
+
+    private var holidayRow: some View {
+        Button(action: onToggleHolidays) {
+            HStack(spacing: 8) {
+                if let holiday {
+                    if holiday.daysUntilStart == 0 {
+                        Text("\(holiday.name)假期中").fontWeight(.semibold).foregroundStyle(Color.accentColor)
+                    } else {
+                        Text("\(holiday.name)假期")
+                        Text("还有 \(holiday.daysUntilStart) 天")
+                            .fontWeight(.semibold).monospacedDigit().foregroundStyle(Color.accentColor)
+                    }
+                    Spacer(minLength: 4)
+                    Text(holiday.dates).foregroundStyle(.secondary)
+                } else {
+                    Text("假期安排待更新").foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
+            }
+            .font(.system(size: 11.5))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.accentColor.opacity(showingHolidays ? 0.17 : 0.09), in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("未来一年假期")
+        .accessibilityValue(holiday.map {
+            let status = $0.daysUntilStart == 0 ? "假期中" : "还有 \($0.daysUntilStart) 天"
+            return "\($0.name)，\(status)，\($0.dates)"
+        } ?? "假期安排待更新")
+        .help(showingHolidays ? "收起假期列表" : "查看未来一年假期 · 按北京时间计算")
     }
 
     private func weekArrow(_ image: String, label: String, offset: Int) -> some View {

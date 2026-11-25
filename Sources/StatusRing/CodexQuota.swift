@@ -14,6 +14,13 @@ struct CodexQuota {
             if minutes % 60 == 0 { return "\(minutes / 60) 小时" }
             return "\(minutes) 分钟"
         }
+
+        func resetCountdown(at now: Date) -> String {
+            guard let resetsAt,
+                  let minutes = Int(exactly: ((resetsAt - now.timeIntervalSince1970) / 60).rounded(.up)) else { return "" }
+            guard minutes > 0 else { return "等待刷新" }
+            return "\(minutes / 1440)天\(minutes / 60 % 24)时\(minutes % 60)分钟后重置"
+        }
     }
 
     let windows: [Window]

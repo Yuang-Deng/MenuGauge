@@ -6,8 +6,11 @@ final class FakeChargingClient: NSObject, PowerUICharging {
     var allowed = false
     var queryFails = false
     var accepts = true
+    var temporarilyDisabled = false
+    var appliesRestoration = true
     var limitCalls = 0
     var optimizedCalls = 0
+    var restoreCalls = 0
     func optimizedState(_ engaged: UnsafeMutablePointer<ObjCBool>, chargeLimit: UnsafeMutablePointer<UInt>,
                         chargingOverrideAllowed: UnsafeMutablePointer<ObjCBool>, withError: NSErrorPointer) -> Bool {
         engaged.pointee = ObjCBool(optimized)
@@ -15,18 +18,27 @@ final class FakeChargingClient: NSObject, PowerUICharging {
         chargingOverrideAllowed.pointee = ObjCBool(allowed)
         return !queryFails
     }
-    func limitEnabled(_ error: NSErrorPointer) -> UInt { limited ? 1 : 0 }
-    func limit(_ error: NSErrorPointer) -> UInt8 { 80 }
+    func limitEnabled(_ error: NSErrorPointer) -> UInt {
+        guard limited else { return 0 }
+        return temporarilyDisabled ? 3 : 1
+    }
+    func limit(_ error: NSErrorPointer) -> UInt8 { temporarilyDisabled ? 100 : 80 }
     func overrideOptimizedCharging(_ error: NSErrorPointer) -> Bool { optimizedCalls += 1; return accepts }
     func overrideChargeLimit(_ error: NSErrorPointer) -> Bool { limitCalls += 1; return accepts }
+    func restoreChargeLimit(_ error: NSErrorPointer) -> Bool {
+        restoreCalls += 1
+        if accepts && appliesRestoration { temporarilyDisabled = false }
+        return accepts
+    }
 }
 
 @main
 struct StatusRingTests {
     static func main() throws {
         try AppearanceChecks.run()
-        try FingerprintChecks.run()
-        try ModelRPCChecks.run()
+        checkEyeReminderCycle()
+        checkHolidayCountdown()
+        checkHolidayPanelPlacement()
         assert(TemperatureText.compact(54.2) == "54°")
         assert(TemperatureText.compact(54.8) == "55°")
         assert(TemperatureText.compact(99.8) == "100°")
@@ -84,6 +96,21 @@ struct StatusRingTests {
         """)
         let fromServer = try CodexQuotaReader().read(executable: fixture)
         assert(fromServer.remainingPercent == 23)
+        try server("""
+        import json,time
+        r=json.loads(input())
+        print(json.dumps({"id":r["id"],"result":{}}),flush=True)
+        input()
+        input()
+        print(json.dumps({"id":77,"method":"item/commandExecution/requestApproval","params":{}}),flush=True)
+        rejection=json.loads(input())
+        assert rejection["id"]==77 and "error" in rejection
+        time.sleep(30)
+        """)
+        do {
+            _ = try CodexQuotaReader().read(executable: fixture)
+            assertionFailure("Quota reads must reject tool and approval requests")
+        } catch { assert(error.localizedDescription.contains("工具或授权")) }
         try server("import time\ntime.sleep(30)\n")
         let started = Date()
         do {
@@ -135,6 +162,28 @@ struct StatusRingTests {
             try charging.chargeToFull(battery: plugged)
             assertionFailure("System rejection must be reported")
         } catch { assert(error.localizedDescription == "系统未接受充满电请求") }
+        fake.accepts = true
+        fake.limited = true
+        fake.optimized = false
+        fake.temporarilyDisabled = true
+        let full = BatteryReading(fraction: 1, mode: .pluggedIn)
+        let override = try charging.read()
+        assert(override.action(for: full) == .restoreLimit(80))
+        let unplugged = BatteryReading(fraction: 0.9, mode: .battery)
+        assert(override.action(for: unplugged) == nil)
+        do {
+            _ = try charging.restoreChargeLimit(80, battery: unplugged)
+            assertionFailure("Cannot restore the limit while unplugged")
+        } catch { assert(fake.restoreCalls == 0) }
+        let restored = try charging.restoreChargeLimit(80, battery: full)
+        assert(restored.limitEnabled && restored.limit == 80 && restored.action(for: full) == nil)
+        assert(restored.action(for: plugged) == .chargeToFull)
+        fake.temporarilyDisabled = true
+        fake.appliesRestoration = false
+        do {
+            _ = try charging.restoreChargeLimit(80, battery: full)
+            assertionFailure("An accepted request must not count as a restored limit without readback")
+        } catch { assert(error.localizedDescription == "系统未确认恢复 80% 充电上限") }
         let before = CPUTicks(user: 100, system: 50, idle: 800, nice: 0)
         let after = CPUTicks(user: 120, system: 60, idle: 870, nice: 0)
         assert(after.usage(since: before) == 30)
@@ -156,6 +205,76 @@ struct StatusRingTests {
         let drive = DiskReading(totalBytes: 1000, availableBytes: 150)
         assert(drive.usedBytes == 850 && drive.usedPercent == 85 && drive.level == .medium)
         assert(DiskReading(totalBytes: 1000, availableBytes: 50).level == .high)
-        print("Metrics, disk, pressure, quota, RPC lifecycle and charging-control checks passed")
+        print("Metrics, disk, pressure, quota, charging, reminders and holiday countdown checks passed")
+    }
+
+    private static func checkEyeReminderCycle() {
+        var cycle = EyeReminderCycle()
+        let start: TimeInterval = 1_000
+        assert(!cycle.tick(at: start, interval: .twenty))
+        assert(cycle.remainingMinutes(at: start) == 20)
+        assert(!cycle.tick(at: start + 1_199, interval: .twenty))
+        let firstReminder = start + 1_200
+        assert(cycle.tick(at: firstReminder, interval: .twenty))
+        assert(!cycle.tick(at: firstReminder, interval: .twenty))
+        assert(cycle.remainingMinutes(at: firstReminder) == 20)
+
+        cycle.snooze(at: firstReminder)
+        assert(cycle.remainingMinutes(at: firstReminder) == 5)
+        assert(!cycle.tick(at: firstReminder + 299, interval: .twenty))
+        assert(cycle.tick(at: firstReminder + 300, interval: .twenty))
+        assert(cycle.remainingMinutes(at: firstReminder + 300) == 20)
+
+        cycle.reset()
+        assert(cycle.remainingMinutes(at: firstReminder + 301) == nil)
+        let nextSession = start + 8 * 3_600
+        assert(!cycle.tick(at: nextSession, interval: .thirty))
+        assert(cycle.remainingMinutes(at: nextSession) == 30)
+        cycle.reset()
+        assert(!cycle.tick(at: nextSession + 65, interval: .fortyFive))
+        assert(cycle.remainingMinutes(at: nextSession + 65) == 45)
+    }
+
+    private static func checkHolidayCountdown() {
+        let format = ISO8601DateFormatter()
+        func holiday(at timestamp: String) -> HolidayCountdown? {
+            HolidayCountdown.current(at: format.date(from: timestamp)!)
+        }
+
+        let november = holiday(at: "2026-11-25T15:59:59Z")
+        assert(november?.name == "元旦" && november?.daysUntilStart == 37 && november?.dates == "1 月 1–3 日")
+        assert(holiday(at: "2026-11-25T16:00:00Z")?.daysUntilStart == 36)
+        assert(holiday(at: "2026-12-31T15:59:59Z")?.daysUntilStart == 1)
+        assert(holiday(at: "2026-12-31T16:00:00Z")?.daysUntilStart == 0)
+        assert(holiday(at: "2027-01-03T15:59:59Z")?.name == "元旦")
+
+        let afterNewYear = holiday(at: "2027-01-03T16:00:00Z")
+        assert(afterNewYear?.name == "春节" && afterNewYear?.daysUntilStart == 32 && afterNewYear?.dates == "2 月 5–13 日")
+        let afterMayDay = holiday(at: "2027-05-08T02:00:00Z")
+        assert(afterMayDay?.name == "端午节" && afterMayDay?.dates == "6 月 9 日")
+        assert(holiday(at: "2027-10-07T16:00:00Z") == nil)
+
+        func year(at timestamp: String) -> HolidayCountdown.Year {
+            HolidayCountdown.year(at: format.date(from: timestamp)!)
+        }
+        let upcoming = year(at: "2026-11-25T15:59:59Z")
+        assert(upcoming.dates == "2026.11.25–2027.11.25")
+        assert(upcoming.holidays.map(\.daysUntilStart) == [37, 72, 129, 157, 196, 294, 310])
+        assert(upcoming.holidays.map(\.daysOff) == [3, 9, 3, 5, 1, 1, 7])
+        let inProgress = year(at: "2027-01-03T15:59:59Z")
+        assert(inProgress.holidays.first?.name == "元旦" && inProgress.holidays.first?.daysUntilStart == 0)
+        assert(year(at: "2027-01-03T16:00:00Z").holidays.first == afterNewYear)
+        assert(year(at: "2026-01-01T00:00:00Z").holidays.isEmpty)
+    }
+
+    private static func checkHolidayPanelPlacement() {
+        let screen = CGRect(x: -1512, y: 20, width: 1512, height: 940)
+        let center = CGRect(x: -880, y: 210, width: 336, height: 625)
+        let right = HolidayPanelPlacement(nextTo: center, on: screen)!.frame(height: 424)
+        assert(screen.contains(right) && right.minX > center.maxX && right.maxY == center.maxY)
+
+        let nearRightEdge = CGRect(x: -356, y: 210, width: 336, height: 625)
+        let left = HolidayPanelPlacement(nextTo: nearRightEdge, on: screen)!.frame(height: 1_100)
+        assert(screen.contains(left) && left.maxX < nearRightEdge.minX && left.height == screen.height)
     }
 }

@@ -10,7 +10,6 @@ final class CodexAppServer: @unchecked Sendable {
     private var input: FileHandle?
     private var output: FileHandle?
     private var buffer = Data()
-    private var notifications: [[String: Any]] = []
     private var requestID = 0
     private let exited = DispatchSemaphore(value: 0)
 
@@ -46,7 +45,7 @@ final class CodexAppServer: @unchecked Sendable {
             lock.unlock()
         } catch { lock.unlock(); throw error }
         do {
-            _ = try request("initialize", params: ["clientInfo": ["name": "menugauge", "title": "MenuGauge", "version": "0.3.1"],
+            _ = try request("initialize", params: ["clientInfo": ["name": "menugauge", "title": "MenuGauge", "version": "0.3.8"],
                                                  "capabilities": ["experimentalApi": true]], timeout: timeout)
             try send(["method": "initialized"])
         } catch { close(); throw error }
@@ -88,13 +87,7 @@ final class CodexAppServer: @unchecked Sendable {
                 guard let result = message["result"] as? [String: Any] else { throw MetricError(message: "Codex 返回了无效响应") }
                 return result
             }
-            if message["method"] != nil { notifications.append(message) }
         }
-    }
-
-    func nextEvent(deadline: TimeInterval) throws -> [String: Any] {
-        if !notifications.isEmpty { return notifications.removeFirst() }
-        return try receive(deadline: deadline)
     }
 
     private func send(_ message: [String: Any]) throws {
@@ -115,8 +108,8 @@ final class CodexAppServer: @unchecked Sendable {
                     throw MetricError(message: "Codex 返回了无效消息")
                 }
                 if message["id"] != nil, message["method"] != nil {
-                    try send(["id": message["id"]!, "error": ["code": -32601, "message": "MenuGauge fingerprint probes do not grant permissions or execute tools"]])
-                    throw MetricError(message: "探测请求了工具或授权，已停止")
+                    try send(["id": message["id"]!, "error": ["code": -32601, "message": "MenuGauge does not accept tool or permission requests"]])
+                    throw MetricError(message: "Codex 请求了工具或授权，已停止读取")
                 }
                 return message
             }
@@ -136,49 +129,6 @@ final class CodexAppServer: @unchecked Sendable {
             let count = Darwin.read(fd, &bytes, bytes.count)
             guard count > 0 else { throw MetricError(message: "Codex 连接已关闭") }
             buffer.append(contentsOf: bytes.prefix(count))
-        }
-    }
-
-    /// A turn is text-only: reject tool attempts, accept only a completed final answer.
-    func answer(threadID: String, prompt: String, effort: String?, timeout: TimeInterval = 300) throws -> String {
-        var params: [String: Any] = ["threadId": threadID, "input": [["type": "text", "text": prompt]],
-                                   "approvalPolicy": "never", "sandboxPolicy": ["type": "readOnly"]]
-        params["effort"] = effort
-        let started = try request("turn/start", params: params)
-        guard let turnID = (started["turn"] as? [String: Any])?["id"] as? String else { throw MetricError(message: "Codex 未返回探测轮次") }
-        var final: String?, unphased: [String] = []
-        let deadline = ProcessInfo.processInfo.systemUptime + timeout
-        do {
-            while true {
-                let message = try nextEvent(deadline: deadline)
-                guard let method = message["method"] as? String, let p = message["params"] as? [String: Any] else { continue }
-                if method == "error", p["willRetry"] as? Bool != true,
-                   p["threadId"] == nil || p["threadId"] is NSNull || p["threadId"] as? String == threadID {
-                    throw MetricError(message: (p["error"] as? [String: Any])?["message"] as? String ?? "模型探测失败")
-                }
-                guard p["threadId"] as? String == threadID else { continue }
-                if method == "item/started", let item = p["item"] as? [String: Any],
-                   let type = item["type"] as? String, !["userMessage", "agentMessage", "reasoning", "hookPrompt"].contains(type) {
-                    throw MetricError(message: "模型尝试调用工具，本次回答不计入指纹")
-                }
-                if method == "item/completed", let item = p["item"] as? [String: Any], item["type"] as? String == "agentMessage",
-                   let text = item["text"] as? String {
-                    if ["final_answer", "final"].contains(item["phase"] as? String ?? "") { final = text }
-                    else if item["phase"] == nil || item["phase"] is NSNull { unphased.append(text) }
-                }
-                if method == "turn/completed", let turn = p["turn"] as? [String: Any], turn["id"] as? String == turnID {
-                    guard turn["status"] as? String == "completed" else {
-                        throw MetricError(message: (turn["error"] as? [String: Any])?["message"] as? String ?? "探测未完成")
-                    }
-                    guard let text = final ?? (unphased.count == 1 ? unphased.first : nil), !text.isEmpty else {
-                        throw MetricError(message: "探测未返回完整文本回答")
-                    }
-                    return text
-                }
-            }
-        } catch {
-            try? send(["id": requestID + 1, "method": "turn/interrupt", "params": ["threadId": threadID, "turnId": turnID]])
-            throw error
         }
     }
 }

@@ -13,10 +13,11 @@ struct StatusPanelData {
     var batteryHealthHint = "相对于新电池的最大容量"
     var powerText = "正在读取电源…"
     var powerHint = ""
-    var showChargeButton = true
+    var showChargeButton = false
     var chargeTitle = "立即充满电"
-    var chargeEnabled = false
+    var chargeAction: ChargingAction?
     var chargeHint = "正在读取充电状态…"
+    var chargeNotice: String?
     var temperature = "— °C"
     var temperatureCelsius: Double?
     var temperatureHint = ""
@@ -51,6 +52,7 @@ struct StatusPanelData {
 
 final class StatusPanelModel: ObservableObject {
     @Published var data = StatusPanelData()
+    @Published var showingHolidays = false
 }
 
 private extension PressureLevel {
@@ -136,9 +138,10 @@ private struct PressureGauge: View {
 struct StatusPanelView: View {
     @ObservedObject var model: StatusPanelModel
     var agenda: CalendarAgenda
-    var monitor: ModelMonitor
+    var eyeReminder: EyeReminder
     @ObservedObject var temperaturePreferences: TemperaturePreferences
-    var onCharge: () -> Void
+    var onCharge: (ChargingAction) -> Void
+    var onToggleHolidays: () -> Void
     var onQuit: () -> Void
     @State private var showingTemperatureSettings = false
 
@@ -171,8 +174,10 @@ struct StatusPanelView: View {
                         .help(data.powerHint)
                     Spacer(minLength: 4)
                     if data.showChargeButton {
-                        Button(data.chargeTitle, action: onCharge)
-                            .controlSize(.small).disabled(!data.chargeEnabled)
+                        Button(data.chargeTitle) {
+                            if let action = data.chargeAction { onCharge(action) }
+                        }
+                            .controlSize(.small).disabled(data.chargeAction == nil)
                             .help(data.chargeHint)
                     }
                 }.frame(minHeight: 24)
@@ -181,6 +186,10 @@ struct StatusPanelView: View {
                     Spacer()
                     Text(data.batteryHealthText).monospacedDigit()
                 }.font(.system(size: 12)).help(data.batteryHealthHint)
+                if let notice = data.chargeNotice {
+                    Text(notice).font(.system(size: 11)).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             Divider()
             VStack(spacing: 10) {
@@ -234,7 +243,6 @@ struct StatusPanelView: View {
                     HStack { Text(detail.window); Spacer(); Text(detail.reset) }
                         .font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit()
                 }
-                ModelCheckView(monitor: monitor)
             }
             Divider()
             HStack(spacing: 6) {
@@ -244,7 +252,10 @@ struct StatusPanelView: View {
                 Text(data.networkSpeed).fixedSize().layoutPriority(1)
             }.font(.system(size: 11)).monospacedDigit().help(data.networkHint)
             Divider()
-            WeekAgendaView(model: agenda)
+            EyeReminderRow(reminder: eyeReminder)
+            Divider()
+            WeekAgendaView(model: agenda, holiday: HolidayCountdown.current(at: Date()),
+                           showingHolidays: model.showingHolidays, onToggleHolidays: onToggleHolidays)
             Divider()
             Button(action: onQuit) {
                 HStack { Text("退出 MenuGauge"); Spacer(); Text("⌘ Q").font(.system(size: 11)).foregroundStyle(.secondary) }
@@ -274,5 +285,48 @@ struct StatusPanelView: View {
         }
         .font(.system(size: 12)).padding(10)
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct EyeReminderRow: View {
+    @ObservedObject var reminder: EyeReminder
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Label("用眼提醒", systemImage: "eye").fontWeight(.semibold).fixedSize()
+            Spacer(minLength: 0)
+            status.font(.system(size: 11)).fixedSize()
+            Picker("提醒间隔", selection: Binding(get: { reminder.interval }, set: reminder.setInterval)) {
+                ForEach(EyeReminderInterval.allCases, id: \.self) { interval in
+                    Text("每 \(interval.rawValue) 分钟").tag(interval)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .controlSize(.mini)
+            Toggle("用眼提醒", isOn: Binding(get: { reminder.enabled }, set: reminder.setEnabled))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .controlSize(.small)
+        }
+    }
+
+    @ViewBuilder private var status: some View {
+        switch reminder.state {
+        case .off: Text("已关闭").foregroundStyle(.secondary)
+        case .checking: Text("读取权限…").foregroundStyle(.secondary)
+        case .awaitingPermission:
+            Text("请允许通知").foregroundStyle(Color.accentColor)
+                .help("在 macOS 的通知授权提示中点「允许」")
+        case .needsNotifications:
+            Button("通知设置") { reminder.enableNotifications() }
+                .buttonStyle(.plain).foregroundStyle(Color.accentColor)
+                .help("在系统通知设置中允许 MenuGauge 显示横幅")
+        case .waitingForScreen: Text("等待亮屏").foregroundStyle(.secondary)
+        case .counting(let minutes):
+            Text("\(minutes) 分钟后").monospacedDigit().foregroundStyle(Color.accentColor)
+        case .failed(let error): Text("通知不可用").foregroundStyle(.secondary).help(error)
+        }
     }
 }

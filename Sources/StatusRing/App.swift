@@ -30,7 +30,9 @@ struct StatusRingApp {
                 do {
                     let charging = try SmartCharging().read()
                     result["chargeLimitPercent"] = charging.limitEnabled ? charging.limit : 100
-                    result["canChargeToFull"] = battery.mode != .battery && battery.fraction < 1 && charging.canOverride
+                    let action = charging.action(for: battery)
+                    result["canChargeToFull"] = action == .chargeToFull
+                    if case .restoreLimit(let limit)? = action { result["restorableChargeLimitPercent"] = limit }
                 } catch {
                     result["chargingControlError"] = error.localizedDescription
                 }
@@ -42,14 +44,6 @@ struct StatusRingApp {
                     entry["resetsAt"] = window.resetsAt
                     return entry
                 }
-                do {
-                    let server = CodexAppServer(); defer { server.close() }
-                    try server.connect()
-                    let integrity = try IntegrityReader().read(server: server)
-                    result["modelCheckSessions"] = integrity.sessions.count
-                    result["modelCheckReadableLogs"] = integrity.sessions.filter { $0.logError == nil }.count
-                    result["fingerprintModels"] = try FingerprintBank.load().models.map(\.id)
-                } catch { result["modelCheckError"] = error.localizedDescription }
                 Thread.sleep(forTimeInterval: 0.5)
                 let usage = try resources.read()
                 result["cpuUsagePercent"] = usage.cpuPercent
@@ -85,9 +79,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let temperaturePreferences = TemperaturePreferences()
     private var temperatureChanges: AnyCancellable?
     @MainActor private lazy var agenda = CalendarAgenda()
-    @MainActor private lazy var modelMonitor = ModelMonitor()
+    @MainActor private lazy var eyeReminder = EyeReminder()
     private let popover = NSPopover()
     private var outsideClickMonitor: Any?
+    private var panelEventMonitor: Any?
+    private var holidayPanel: HolidaySidePanel?
+    private var holidayPanelUpdates: AnyCancellable?
     private var temperatureReader: TemperatureReader?
     private var metricsTimer: Timer?
     private var resourceReader = ResourceReader()
@@ -113,7 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var chargingState: ChargingControlState?
     private var chargingError: String?
     private var chargingRequestID = UUID()
-    private var chargingActionInFlight = false
+    private var pendingChargeAction: ChargingAction?
+    private var chargingNotice: (id: UUID, text: String)?
     private var powerSource: CFRunLoopSource?
     private var wakeObserver: NSObjectProtocol?
     private var battery: BatteryReading?
@@ -133,17 +131,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         item.button?.imageScaling = .scaleNone
         item.button?.target = self
         item.button?.action = #selector(togglePanel)
-        popover.behavior = .transient
+        // The status popover and its holiday panel share an outside-click boundary.
+        popover.behavior = .applicationDefined
         popover.animates = false
         popover.delegate = self
-        let host = NSHostingController(rootView: StatusPanelView(model: panelModel, agenda: agenda, monitor: modelMonitor,
+        let host = NSHostingController(rootView: StatusPanelView(model: panelModel, agenda: agenda, eyeReminder: eyeReminder,
             temperaturePreferences: temperaturePreferences,
-            onCharge: { [weak self] in self?.chargeToFull() },
+            onCharge: { [weak self] action in self?.performChargeAction(action) },
+            onToggleHolidays: { [weak self] in self?.toggleHolidayPanel() },
             onQuit: { [weak self] in self?.quitApp() }))
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
         temperatureChanges = temperaturePreferences.$thresholds.dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateDisplay() }
+        eyeReminder.start()
         refreshBattery()
         refreshBatteryHealth()
         startMetrics()
@@ -170,10 +171,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.refreshBattery()
-            self?.startMetrics()
-            self?.refreshDisk()
-            self?.refreshQuota()
+            MainActor.assumeIsolated {
+                self?.eyeReminder.resetForScreenChange()
+                self?.refreshBattery()
+                self?.startMetrics()
+                self?.refreshDisk()
+                self?.refreshQuota()
+            }
         }
     }
 
@@ -182,10 +186,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return false
     }
 
+    @MainActor
     @objc private func togglePanel() {
         guard let button = item.button else { return }
         if popover.isShown {
-            popover.performClose(nil)
+            closePanel()
         } else {
             NSApplication.shared.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -194,12 +199,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationDidResignActive(_ notification: Notification) {
-        if popover.isShown { popover.performClose(nil) }
+        closePanel()
+    }
+
+    @MainActor
+    private func closePanel() {
+        guard popover.isShown else { return }
+        // AppKit won't performClose while a child window is attached.
+        closeHolidayPanel()
+        popover.performClose(nil)
+    }
+
+    @MainActor
+    private func toggleHolidayPanel() {
+        if holidayPanel != nil {
+            closeHolidayPanel(restoreFocus: true)
+            return
+        }
+        guard popover.isShown, let anchor = popover.contentViewController?.view.window else { return }
+        let panel = HolidaySidePanel { [weak self] in self?.closeHolidayPanel(restoreFocus: true) }
+        guard panel.position(nextTo: anchor) else {
+            NSSound.beep()
+            return
+        }
+        holidayPanel = panel
+        anchor.addChildWindow(panel, ordered: .above)
+        panel.makeKeyAndOrderFront(nil)
+        panelModel.showingHolidays = true
+        holidayPanelUpdates = panelModel.$data.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self, weak panel, weak anchor] _ in
+                guard let panel, let anchor else { return }
+                if !panel.position(nextTo: anchor) { self?.closeHolidayPanel(restoreFocus: true) }
+            }
+    }
+
+    @MainActor
+    private func closeHolidayPanel(restoreFocus: Bool = false) {
+        guard let panel = holidayPanel else { return }
+        let anchor = panel.parent
+        let wasKey = panel.isKeyWindow
+        holidayPanelUpdates?.cancel()
+        holidayPanelUpdates = nil
+        holidayPanel = nil
+        panelModel.showingHolidays = false
+        panel.orderOut(nil)
+        if restoreFocus && wasKey { anchor?.makeKey() }
     }
 
     func popoverWillShow(_ notification: Notification) {
         agenda.open()
-        modelMonitor.open()
+        eyeReminder.refreshPermission()
         refreshDisk()
         refreshBattery()
         refreshBatteryHealth()
@@ -231,28 +280,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverDidShow(_ notification: Notification) {
-        // A status-item popover can remain visible while another app is active;
-        // transient behavior alone does not reliably dismiss it on outside clicks.
-        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            guard let self, self.popover.isShown else { return }
-            if let button = self.item.button, let window = button.window,
-               window.convertToScreen(button.convert(button.bounds, to: nil)).contains(NSEvent.mouseLocation) {
-                // The status button already toggles the popover in its action.
-                return
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: clicks) { [weak self] _ in
+            self?.dismissIfOutside(at: NSEvent.mouseLocation)
+        }
+        panelEventMonitor = NSEvent.addLocalMonitorForEvents(matching: clicks.union(.keyDown)) { [weak self] event in
+            guard let self, self.popover.isShown else { return event }
+            if event.type == .keyDown {
+                guard event.keyCode == 53 else { return event }
+                if self.holidayPanel != nil { self.closeHolidayPanel(restoreFocus: true) }
+                else { self.closePanel() }
+                return nil
             }
-            self.popover.performClose(nil)
+            let point = event.window?.convertPoint(toScreen: event.locationInWindow) ?? event.locationInWindow
+            self.dismissIfOutside(at: point)
+            return event
         }
     }
 
-    private func removeOutsideClickMonitor() {
+    @MainActor
+    private func dismissIfOutside(at point: NSPoint) {
+        guard popover.isShown,
+              popover.contentViewController?.view.window?.frame.contains(point) != true,
+              holidayPanel?.frame.contains(point) != true else { return }
+        if let button = item.button, let window = button.window,
+           window.convertToScreen(button.convert(button.bounds, to: nil)).contains(point) { return }
+        closePanel()
+    }
+
+    private func removePanelEventMonitors() {
         if let outsideClickMonitor { NSEvent.removeMonitor(outsideClickMonitor) }
+        if let panelEventMonitor { NSEvent.removeMonitor(panelEventMonitor) }
         outsideClickMonitor = nil
+        panelEventMonitor = nil
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        closeHolidayPanel()
     }
 
     func popoverDidClose(_ notification: Notification) {
-        removeOutsideClickMonitor()
+        removePanelEventMonitors()
         agenda.close()
-        modelMonitor.close()
         networkTimer?.invalidate()
         networkTimer = nil
         networkReader = nil
@@ -313,15 +382,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         logger.error("\(error.localizedDescription, privacy: .public)")
     }
 
-    private func updateChargingButton() { updatePanel() }
-
     private func refreshChargingControls() {
-        guard !chargingActionInFlight, !terminating else { return }
+        guard pendingChargeAction == nil, !terminating else { return }
         let requestID = UUID()
         chargingRequestID = requestID
         guard battery != nil, battery?.mode != .battery else {
             chargingState = nil
-            updateChargingButton()
+            updatePanel()
             return
         }
         chargingQueue.async { [weak self] in
@@ -336,26 +403,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     self.chargingState = nil
                     self.chargingError = error.localizedDescription
                 }
-                self.updateChargingButton()
+                self.updatePanel()
             }
         }
     }
 
-    @objc private func chargeToFull() {
-        guard !chargingActionInFlight else { return }
-        chargingActionInFlight = true
-        chargingRequestID = UUID()
-        updateChargingButton()
+    private func performChargeAction(_ action: ChargingAction) {
+        guard pendingChargeAction == nil, !terminating else { return }
+        let requestID = UUID()
+        pendingChargeAction = action
+        chargingNotice = nil
+        chargingRequestID = requestID
+        updatePanel()
         chargingQueue.async { [weak self] in
-            let result = Result { try SmartCharging().chargeToFull(battery: BatteryReader.read()) }
+            let result = Result { () -> ChargingControlState in
+                let controller = try SmartCharging()
+                let battery = try BatteryReader.read()
+                switch action {
+                case .chargeToFull:
+                    try controller.chargeToFull(battery: battery)
+                    return try controller.read()
+                case .restoreLimit(let limit):
+                    return try controller.restoreChargeLimit(limit, battery: battery)
+                }
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.terminating else { return }
-                self.chargingActionInFlight = false
+                self.pendingChargeAction = nil
+                if case .success(let state) = result {
+                    self.chargingState = state
+                    self.chargingError = nil
+                    let message: String
+                    switch action {
+                    case .chargeToFull: message = "已请求充满电"
+                    case .restoreLimit(let limit): message = "已恢复 \(limit)% 充电上限"
+                    }
+                    self.chargingNotice = (requestID, message)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                        guard let self, self.chargingNotice?.id == requestID else { return }
+                        self.chargingNotice = nil
+                        self.updatePanel()
+                    }
+                }
                 self.refreshBattery()
                 if case .failure(let error) = result {
-                    self.popover.performClose(nil)
+                    self.closePanel()
                     let alert = NSAlert()
-                    alert.messageText = "无法请求充满电"
+                    alert.messageText = "无法\(action.title)"
                     alert.informativeText = error.localizedDescription
                     alert.addButton(withTitle: "好")
                     NSApplication.shared.activate(ignoringOtherApps: true)
@@ -392,6 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    @MainActor
     private func startMetrics() {
         metricsTimer?.invalidate()
         resourceReader = ResourceReader()
@@ -404,13 +499,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             logger.error("\(error.localizedDescription, privacy: .public)")
         }
         refreshMetrics()
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refreshMetrics() }
+        let refresh: @MainActor @Sendable () -> Void = { [weak self] in self?.refreshMetrics() }
+        let timer = Timer(timeInterval: 2, repeats: true) { _ in
+            MainActor.assumeIsolated { refresh() }
+        }
         timer.tolerance = 0.2
         RunLoop.main.add(timer, forMode: .common)
         metricsTimer = timer
     }
 
+    @MainActor
     private func refreshMetrics() {
+        eyeReminder.tick()
         if temperatureReader != nil { refreshTemperature() }
         do {
             resources = try resourceReader.read()
@@ -480,21 +580,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         data.powerText = battery?.mode.label ?? "电源状态未知"
         data.powerHint = batteryError ?? ""
-        if battery?.mode == .pluggedIn, let chargingState, chargingState.limitEnabled {
-            data.powerText = "已插电 · 上限 \(chargingState.limit)%"
+        if let battery, battery.mode != .battery {
+            data.showChargeButton = true
+            if battery.fraction >= 1 { data.powerText = "已充满" }
+            if let chargingState, chargingState.restorableLimit != nil {
+                data.powerText += " · 临时充满"
+            } else if let chargingState, chargingState.limitEnabled && chargingState.limit < 100 {
+                let power = battery.mode == .charging ? "正在充电" : "已插电"
+                data.powerText = "\(power) · 上限 \(chargingState.limit)%"
+            }
+            if let pendingChargeAction {
+                data.chargeTitle = pendingChargeAction.pendingTitle
+                data.chargeHint = pendingChargeAction.pendingTitle
+            } else if let action = chargingState?.action(for: battery) {
+                data.chargeAction = action
+                data.chargeTitle = action.title
+                data.chargeHint = action.help
+            } else {
+                if battery.fraction >= 1 { data.chargeTitle = "已充满" }
+                else if battery.mode == .charging { data.chargeTitle = "充电中" }
+                data.chargeHint = chargingError ?? (chargingState == nil ? "正在读取充电状态…" : "当前没有需要解除的充电限制")
+            }
+            data.chargeNotice = chargingNotice?.text
         }
-        if (battery?.fraction ?? 0) >= 1 { data.powerText = "已充满" }
-        data.showChargeButton = battery?.mode != .battery
-        data.chargeEnabled = !chargingActionInFlight && battery != nil
-            && battery?.mode != .battery && (battery?.fraction ?? 1) < 1
-            && chargingState?.canOverride == true
-        data.chargeTitle = chargingActionInFlight ? "正在请求…" : "立即充满电"
-        if !data.chargeEnabled && !chargingActionInFlight {
-            if (battery?.fraction ?? 0) >= 1 { data.chargeTitle = "已充满" }
-            else if battery?.mode == .charging && chargingState?.canOverride == false { data.chargeTitle = "充电中" }
-        }
-        data.chargeHint = chargingError ?? (chargingState?.canOverride == false
-            ? "当前没有需要解除的充电限制" : "临时解除充电限制，充至 100%")
         data.temperature = temperature.map { String(format: "%.0f °C", $0) } ?? "— °C"
         data.temperatureCelsius = temperature
         data.temperatureHint = temperatureError ?? "CPU 传感器最高温度"
@@ -513,25 +621,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         data.quotaMessage = quotaError == nil ? "正在读取…" : "额度不可用"
         data.quotaHint = quotaError.map { "额度读取失败：" + $0 } ?? ""
         if let quota {
+            let now = Date()
             let formatter = DateFormatter()
             formatter.dateFormat = Calendar.current.isDateInToday(quota.fetchedAt) ? "HH:mm" : "MM/dd HH:mm"
             data.quotaHint = "额度读取于 " + formatter.string(from: quota.fetchedAt)
             if let quotaError {
                 data.quotaHint += "\n刷新失败：" + quotaError + "\n当前显示上次成功读取的额度"
-            } else if quota.isStale() {
+            } else if quota.isStale(at: now) {
                 data.quotaHint += "\n当前显示上次成功读取的额度，等待刷新"
             }
             data.quotaDetails = quota.windows.enumerated().map { index, window in
-                var resetText = ""
-                if let reset = window.resetsAt {
-                    let date = Date(timeIntervalSince1970: reset)
-                    formatter.dateFormat = Calendar.current.isDateInToday(date) ? "今天 HH:mm" : "MM/dd HH:mm"
-                    resetText = formatter.string(from: date) + " 重置"
-                }
                 let label = quota.windows.count > 1
                     ? String(format: "%@ · 剩余 %.0f%%", window.label, window.remainingPercent)
                     : window.label + "额度"
-                return QuotaDetail(id: index, window: label, reset: resetText)
+                return QuotaDetail(id: index, window: label, reset: window.resetCountdown(at: now))
             }
         }
         data.networkAddress = networkAddress.map { "\(exitCountry?.flag ?? "🌐") \($0.address)" } ?? "🌐 未连接网络"
@@ -572,11 +675,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         terminating = true
         temperatureChanges?.cancel()
-        removeOutsideClickMonitor()
+        removePanelEventMonitors()
+        closeHolidayPanel()
         quotaTimer?.invalidate()
         quotaReader?.cancel()
-        modelMonitor.stop()
         metricsTimer?.invalidate()
+        eyeReminder.stop()
         if let powerSource { CFRunLoopSourceInvalidate(powerSource) }
         networkTimer?.invalidate()
         networkMonitor?.stop()
