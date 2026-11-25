@@ -248,7 +248,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverWillShow(_ notification: Notification) {
         agenda.open()
-        eyeReminder.refreshPermission()
         refreshDisk()
         refreshBattery()
         refreshBatteryHealth()

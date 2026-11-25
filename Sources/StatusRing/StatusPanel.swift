@@ -63,29 +63,6 @@ private extension PressureLevel {
     }
 }
 
-struct UsageBar: View {
-    let fraction: Double?
-    let tint: Color
-    let label: String
-    var height: CGFloat = 6
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.1))
-                if let fraction {
-                    Capsule().fill(tint)
-                        .frame(width: geometry.size.width * min(1, max(0, fraction)))
-                }
-            }
-        }
-        .frame(height: height)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(label)
-        .accessibilityValue(fraction.map { String(format: "%.0f%%", $0 * 100) } ?? "不可用")
-    }
-}
-
 private struct GaugeArc: Shape {
     let fraction: Double
 
@@ -315,18 +292,13 @@ private struct EyeReminderRow: View {
     @ViewBuilder private var status: some View {
         switch reminder.state {
         case .off: Text("已关闭").foregroundStyle(.secondary)
-        case .checking: Text("读取权限…").foregroundStyle(.secondary)
-        case .awaitingPermission:
-            Text("请允许通知").foregroundStyle(Color.accentColor)
-                .help("在 macOS 的通知授权提示中点「允许」")
-        case .needsNotifications:
-            Button("通知设置") { reminder.enableNotifications() }
-                .buttonStyle(.plain).foregroundStyle(Color.accentColor)
-                .help("在系统通知设置中允许 MenuGauge 显示横幅")
         case .waitingForScreen: Text("等待亮屏").foregroundStyle(.secondary)
         case .counting(let minutes):
             Text("\(minutes) 分钟后").monospacedDigit().foregroundStyle(Color.accentColor)
-        case .failed(let error): Text("通知不可用").foregroundStyle(.secondary).help(error)
+        case .reminding(.ready): Text("休息时间到").foregroundStyle(Color.accentColor)
+        case .reminding(.counting(let seconds)):
+            Text("还剩 \(seconds) 秒").monospacedDigit().foregroundStyle(Color.accentColor)
+        case .reminding(.complete): Text("休息完成").foregroundStyle(Color.accentColor)
         }
     }
 }

@@ -217,16 +217,18 @@ struct StatusRingTests {
         let firstReminder = start + 1_200
         assert(cycle.tick(at: firstReminder, interval: .twenty))
         assert(!cycle.tick(at: firstReminder, interval: .twenty))
-        assert(cycle.remainingMinutes(at: firstReminder) == 20)
+        let later = firstReminder + 3_600
+        assert(!cycle.tick(at: later, interval: .twenty))
+        assert(cycle.remainingMinutes(at: later) == nil)
 
-        cycle.snooze(at: firstReminder)
-        assert(cycle.remainingMinutes(at: firstReminder) == 5)
-        assert(!cycle.tick(at: firstReminder + 299, interval: .twenty))
-        assert(cycle.tick(at: firstReminder + 300, interval: .twenty))
-        assert(cycle.remainingMinutes(at: firstReminder + 300) == 20)
+        cycle.snooze(at: later)
+        assert(cycle.remainingMinutes(at: later) == 5)
+        assert(!cycle.tick(at: later + 299, interval: .twenty))
+        assert(cycle.tick(at: later + 300, interval: .twenty))
+        assert(cycle.remainingMinutes(at: later + 300) == nil)
 
         cycle.reset()
-        assert(cycle.remainingMinutes(at: firstReminder + 301) == nil)
+        assert(cycle.remainingMinutes(at: later + 301) == nil)
         let nextSession = start + 8 * 3_600
         assert(!cycle.tick(at: nextSession, interval: .thirty))
         assert(cycle.remainingMinutes(at: nextSession) == 30)

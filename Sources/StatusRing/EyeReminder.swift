@@ -1,7 +1,7 @@
 import AppKit
 import Combine
 import CoreGraphics
-import UserNotifications
+import SwiftUI
 
 enum EyeReminderInterval: Int, CaseIterable {
     case twenty = 20
@@ -12,68 +12,69 @@ enum EyeReminderInterval: Int, CaseIterable {
 }
 
 struct EyeReminderCycle {
-    private var deadline: TimeInterval?
-
-    mutating func reset() { deadline = nil }
-
-    mutating func tick(at now: TimeInterval, interval: EyeReminderInterval) -> Bool {
-        if let deadline, deadline > now { return false }
-        let isDue = deadline != nil
-        deadline = now + interval.duration
-        return isDue
+    private enum Phase {
+        case idle
+        case counting(until: TimeInterval)
+        case awaitingResponse
     }
 
-    mutating func snooze(at now: TimeInterval) { deadline = now + 5 * 60 }
+    private var phase = Phase.idle
+
+    mutating func reset() { phase = .idle }
+
+    mutating func tick(at now: TimeInterval, interval: EyeReminderInterval) -> Bool {
+        switch phase {
+        case .idle:
+            phase = .counting(until: now + interval.duration)
+        case .counting(let deadline) where deadline <= now:
+            phase = .awaitingResponse
+            return true
+        case .counting, .awaitingResponse:
+            break
+        }
+        return false
+    }
+
+    mutating func snooze(at now: TimeInterval) { phase = .counting(until: now + 5 * 60) }
 
     func remainingMinutes(at now: TimeInterval) -> Int? {
-        deadline.map { max(1, Int(ceil(($0 - now) / 60))) }
+        guard case .counting(let deadline) = phase else { return nil }
+        return max(1, Int(ceil((deadline - now) / 60)))
     }
 }
 
 @MainActor
-final class EyeReminder: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
-    enum State: Equatable {
-        case off, checking, awaitingPermission, needsNotifications, waitingForScreen, counting(Int), failed(String)
-
-        var canCount: Bool {
-            switch self {
-            case .waitingForScreen, .counting: return true
-            default: return false
-            }
-        }
+final class EyeReminder: ObservableObject {
+    enum RestState: Equatable {
+        case ready, counting(Int), complete
     }
 
-    private enum PermissionAction { case check, enable, settings }
+    enum State: Equatable {
+        case off, waitingForScreen, counting(Int), reminding(RestState)
+    }
 
+    static let restSeconds = 20
     private static let enabledKey = "eyeReminder.enabled"
     private static let intervalKey = "eyeReminder.interval"
-    private static let categoryID = "eyeReminder.break"
-    private static let snoozeID = "eyeReminder.snooze"
 
     @Published private(set) var enabled: Bool
     @Published private(set) var interval: EyeReminderInterval
     @Published private(set) var state: State = .off
 
     private let defaults: UserDefaults
-    private let center = UNUserNotificationCenter.current()
     private var cycle = EyeReminderCycle()
     private var activityChanges: AnyCancellable?
-    private var permissionTask: Task<Void, Never>?
-    private var noticeID: String?
+    private var panel: EyeReminderPanel?
+    private var restDeadline: TimeInterval?
+    private var restTimer: Timer?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         enabled = defaults.bool(forKey: Self.enabledKey)
         interval = EyeReminderInterval(rawValue: defaults.integer(forKey: Self.intervalKey)) ?? .twenty
-        super.init()
     }
 
     func start() {
-        center.delegate = self
-        let snooze = UNNotificationAction(identifier: Self.snoozeID, title: "5 分钟后提醒", options: [])
-        center.setNotificationCategories([
-            UNNotificationCategory(identifier: Self.categoryID, actions: [snooze], intentIdentifiers: [], options: [])
-        ])
         let workspace = NSWorkspace.shared.notificationCenter
         let events: [Notification.Name] = [
             NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification,
@@ -87,13 +88,14 @@ final class EyeReminder: NSObject, ObservableObject, UNUserNotificationCenterDel
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in self?.resetForScreenChange() }
-        refreshPermission()
+        resetForScreenChange()
+        tick()
     }
 
     func stop() {
         activityChanges?.cancel()
-        permissionTask?.cancel()
-        clearNotice()
+        activityChanges = nil
+        resetForScreenChange()
     }
 
     func setEnabled(_ value: Bool) {
@@ -101,156 +103,260 @@ final class EyeReminder: NSObject, ObservableObject, UNUserNotificationCenterDel
         enabled = value
         defaults.set(value, forKey: Self.enabledKey)
         resetForScreenChange()
-        if value {
-            checkPermission(.enable)
-        } else {
-            permissionTask?.cancel()
-            permissionTask = nil
-            state = .off
-        }
+        tick()
     }
 
     func setInterval(_ value: EyeReminderInterval) {
         guard interval != value else { return }
         interval = value
         defaults.set(value.rawValue, forKey: Self.intervalKey)
-        resetForScreenChange()
-        tick()
+        if panel == nil {
+            cycle.reset()
+            tick()
+        }
     }
-
-    func refreshPermission() { checkPermission(.check) }
-    func enableNotifications() { checkPermission(.settings) }
 
     func resetForScreenChange() {
         cycle.reset()
-        clearNotice()
-        if state.canCount { state = .waitingForScreen }
+        hidePanel()
+        let next: State = enabled ? .waitingForScreen : .off
+        if state != next { state = next }
     }
 
     func tick() {
-        guard state.canCount else { return }
-        guard Self.isScreenActive() else {
+        guard enabled else { return }
+        guard let screen = Self.activeScreen() else {
             if state != .waitingForScreen { resetForScreenChange() }
             return
         }
         let now = ProcessInfo.processInfo.systemUptime
-        let isDue = cycle.tick(at: now, interval: interval)
-        if let minutes = cycle.remainingMinutes(at: now), state != .counting(minutes) {
+        if let restDeadline {
+            let remaining = Int(ceil(restDeadline - now))
+            if remaining <= 0 {
+                stopRestTimer()
+                updateRest(.complete)
+            } else {
+                updateRest(.counting(remaining))
+            }
+            return
+        }
+        if cycle.tick(at: now, interval: interval) {
+            let panel = EyeReminderPanel(
+                onStart: { [weak self] in self?.startRest() },
+                onClose: { [weak self] in self?.dismiss(snooze: false) },
+                onSnooze: { [weak self] in self?.dismiss(snooze: true) }
+            )
+            self.panel = panel
+            state = .reminding(.ready)
+            panel.show(on: screen)
+        } else if let minutes = cycle.remainingMinutes(at: now), state != .counting(minutes) {
             state = .counting(minutes)
         }
-        if isDue { deliverNotice() }
     }
 
-    private static func isScreenActive() -> Bool {
+    private func startRest() {
+        guard state == .reminding(.ready) else { return }
+        restDeadline = ProcessInfo.processInfo.systemUptime + Double(Self.restSeconds)
+        updateRest(.counting(Self.restSeconds))
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        restTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func updateRest(_ rest: RestState) {
+        let next = State.reminding(rest)
+        guard state != next else { return }
+        state = next
+        panel?.update(rest)
+    }
+
+    private func stopRestTimer() {
+        restTimer?.invalidate()
+        restTimer = nil
+        restDeadline = nil
+    }
+
+    private func dismiss(snooze: Bool) {
+        hidePanel()
+        if snooze {
+            cycle.snooze(at: ProcessInfo.processInfo.systemUptime)
+        } else {
+            cycle.reset()
+        }
+        tick()
+    }
+
+    private func hidePanel() {
+        stopRestTimer()
+        panel?.orderOut(nil)
+        panel = nil
+    }
+
+    private static func activeScreen() -> NSScreen? {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
               session[kCGSessionOnConsoleKey] as? Bool == true,
               session[kCGSessionLoginDoneKey] as? Bool == true,
-              session["CGSSessionScreenIsLocked"] as? Bool != true else { return false }
-        return NSScreen.screens.contains { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
+              session["CGSSessionScreenIsLocked"] as? Bool != true else { return nil }
+        let screens = NSScreen.screens.filter { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
             return CGDisplayIsAsleep(number.uint32Value) == 0
         }
+        let pointer = NSEvent.mouseLocation
+        return screens.first { $0.frame.contains(pointer) } ?? screens.first
+    }
+}
+
+@MainActor
+private final class EyeReminderPanel: NSPanel {
+    private let host: EyeReminderHostingView
+
+    init(onStart: @escaping () -> Void, onClose: @escaping () -> Void, onSnooze: @escaping () -> Void) {
+        host = EyeReminderHostingView(rootView: EyeReminderCard(
+            icon: NSApplication.shared.applicationIconImage,
+            onStart: onStart, onClose: onClose, onSnooze: onSnooze
+        ))
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
+        title = "MenuGauge 用眼提醒"
+        isFloatingPanel = true
+        level = .floating
+        hidesOnDeactivate = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        isReleasedWhenClosed = false
+        isExcludedFromWindowsMenu = true
+        host.sizingOptions = [.intrinsicContentSize]
+        contentView = host
     }
 
-    private static func alertsEnabled(_ settings: UNNotificationSettings) -> Bool {
-        settings.authorizationStatus == .authorized && settings.alertSetting == .enabled && settings.alertStyle != .none
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    func show(on screen: NSScreen) {
+        let frame = screen.visibleFrame.insetBy(dx: 14, dy: 14)
+        host.rootView.width = min(host.rootView.width, frame.width)
+        fit(topRight: CGPoint(x: frame.maxX, y: frame.maxY))
+        orderFrontRegardless()
     }
 
-    private func checkPermission(_ action: PermissionAction) {
-        guard enabled, permissionTask == nil else { return }
-        if !state.canCount { state = .checking }
-        permissionTask = Task { [weak self, center] in
-            var settings = await center.notificationSettings()
-            guard let self, !Task.isCancelled else { return }
-            defer { if !Task.isCancelled { self.permissionTask = nil } }
-            let shouldPrompt = action != .check && settings.authorizationStatus == .notDetermined
-            if shouldPrompt {
-                self.state = .awaitingPermission
-                do {
-                    _ = try await center.requestAuthorization(options: [.alert])
-                    settings = await center.notificationSettings()
-                } catch {
-                    if !Task.isCancelled { self.state = .failed(error.localizedDescription) }
-                    return
+    func update(_ rest: EyeReminder.RestState) {
+        host.rootView.rest = rest
+        fit(topRight: CGPoint(x: frame.maxX, y: frame.maxY))
+    }
+
+    private func fit(topRight: CGPoint) {
+        let width = host.rootView.width
+        let height = ceil(host.fittingSize.height)
+        let rect = NSRect(x: topRight.x - width, y: topRight.y - height, width: width, height: height)
+        if frame != rect { setFrame(rect, display: true) }
+    }
+}
+
+private final class EyeReminderHostingView: NSHostingView<EyeReminderCard> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private struct EyeReminderCard: View {
+    let icon: NSImage
+    let onStart: () -> Void
+    let onClose: () -> Void
+    let onSnooze: () -> Void
+    var rest: EyeReminder.RestState = .ready
+    var width: CGFloat = 320
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 16)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 36, height: 36)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(heading).font(.system(size: 14, weight: .semibold))
+                    if let detail {
+                        Text(detail).font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
                 }
-            }
-            guard !Task.isCancelled else { return }
-            if Self.alertsEnabled(settings) {
-                if !self.state.canCount { self.state = .waitingForScreen }
-                self.tick()
-            } else {
-                self.resetForScreenChange()
-                self.state = .needsNotifications
-                if action == .settings, !shouldPrompt,
-                   let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"),
-                   !NSWorkspace.shared.open(url) {
-                    self.state = .failed("无法打开系统通知设置")
+                Spacer(minLength: 4)
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("关闭用眼提醒")
+                .help("关闭用眼提醒")
             }
+            switch rest {
+            case .ready:
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Button("5 分钟后提醒", action: onSnooze).buttonStyle(.bordered)
+                    primaryButton("开始休息", action: onStart)
+                }
+                .controlSize(.small)
+            case .counting(let seconds):
+                VStack(spacing: 5) {
+                    Text(String(format: "00:%02d", seconds))
+                        .font(.system(size: 30, weight: .semibold))
+                        .monospacedDigit()
+                        .accessibilityLabel("剩余 \(seconds) 秒")
+                    UsageBar(fraction: Double(seconds) / Double(EyeReminder.restSeconds),
+                             tint: Color.accentColor, label: "休息剩余时间", height: 4)
+                        .accessibilityHidden(true)
+                }
+                .frame(maxWidth: .infinity)
+            case .complete:
+                HStack {
+                    Spacer(minLength: 0)
+                    primaryButton("继续工作", action: onClose)
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(14)
+        .frame(width: width)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color(nsColor: .windowBackgroundColor), in: shape)
+        .clipShape(shape)
+        .overlay {
+            shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 1).allowsHitTesting(false)
         }
     }
 
-    private func deliverNotice() {
-        clearNotice()
-        let id = UUID().uuidString
-        noticeID = id
-        Task { [weak self, center] in
-            let settings = await center.notificationSettings()
-            guard let self, self.noticeID == id else { return }
-            guard Self.isScreenActive() else {
-                self.resetForScreenChange()
-                return
-            }
-            guard Self.alertsEnabled(settings) else {
-                self.resetForScreenChange()
-                self.state = .needsNotifications
-                return
-            }
-            let content = UNMutableNotificationContent()
-            content.title = "眼睛休息一下"
-            content.body = "看向远处 20 秒。"
-            content.categoryIdentifier = Self.categoryID
-            do {
-                try await center.add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
-                if self.noticeID != id { self.removeNotice(id) }
-            } catch {
-                guard self.noticeID == id else { return }
-                self.resetForScreenChange()
-                self.state = .failed(error.localizedDescription)
-            }
+    private func primaryButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color(nsColor: .alternateSelectedControlTextColor))
+                .padding(.horizontal, 10)
+                .frame(height: 24)
+                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var heading: String {
+        switch rest {
+        case .ready: return "眼睛休息一下"
+        case .counting: return "看向远处"
+        case .complete: return "休息完成"
         }
     }
 
-    private func clearNotice() {
-        guard let id = noticeID else { return }
-        noticeID = nil
-        removeNotice(id)
-    }
-
-    private func removeNotice(_ id: String) {
-        center.removePendingNotificationRequests(withIdentifiers: [id])
-        center.removeDeliveredNotifications(withIdentifiers: [id])
-    }
-
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                             willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        await presentationOptions(for: notification.request.identifier)
-    }
-
-    private func presentationOptions(for id: String) -> UNNotificationPresentationOptions {
-        noticeID == id && state.canCount && Self.isScreenActive() ? [.banner, .list] : []
-    }
-
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        let action = response.actionIdentifier
-        let id = response.notification.request.identifier
-        await handleAction(action, notice: id)
-    }
-
-    private func handleAction(_ action: String, notice id: String) {
-        guard action == Self.snoozeID, noticeID == id, state.canCount, Self.isScreenActive() else { return }
-        clearNotice()
-        cycle.snooze(at: ProcessInfo.processInfo.systemUptime)
-        tick()
+    private var detail: String? {
+        switch rest {
+        case .ready: return "看向远处 \(EyeReminder.restSeconds) 秒"
+        case .counting: return nil
+        case .complete: return "\(EyeReminder.restSeconds) 秒到了"
+        }
     }
 }

@@ -8,7 +8,7 @@ MenuGauge 是一个原生 macOS 菜单栏小工具。扫一眼能看电量、CPU
 
 ## 下载试用
 
-在 [v0.3.8 Release](https://github.com/Yuang-Deng/MenuGauge/releases/tag/v0.3.8) 下载 `MenuGauge-0.3.8-arm64-preview.zip`。这是 Apple 芯片 Mac 的预览包，解压后把 MenuGauge 拖进「应用程序」再打开。
+在 [v0.3.10 Release](https://github.com/Yuang-Deng/MenuGauge/releases/tag/v0.3.10) 下载 `MenuGauge-0.3.10-arm64-preview.zip`。这是 Apple 芯片 Mac 的预览包，解压后把 MenuGauge 拖进「应用程序」再打开。
 
 预览包尚未经过 Apple 公证。如果第一次打开时 macOS 提示无法验证开发者，确认文件来自本仓库后，可在「系统设置 → 隐私与安全性」为 MenuGauge 选择「仍要打开」。也可以按下文在本机从源码构建。 [Apple 打开下载应用的说明](https://support.apple.com/zh-cn/102445)
 
@@ -41,7 +41,13 @@ open 'dist/MenuGauge.app'
 - 面板底部显示周历。点「连接日历」并授权后，日期下方的圆点表示有安排，点击日期查看当天的时间和标题。日程直接读取 Mac「日历」App 已同步的事件，在本机显示。
 - 周历标题下显示最近的中国大陆假期及倒计时，按北京时间的日历日计算。点假期行可在面板旁查看未来一年内已公布的假期、放假日期和剩余天数。假期开始后显示「假期中」，结束后切换到下一次。内置[国务院公布的 2027 年放假安排](https://chinajob.mohrss.gov.cn/h5/c/2026-11-09/635850.shtml)。
 - 展开菜单将旗帜、本机地址和网速放在同一行，每秒更新，收起菜单后停止采样。地址优先显示 IPv4，否则显示 IPv6。旗帜由 [ipwho.is](https://ipwhois.io/documentation) 根据 HTTPS 请求的公网出口判断，结果缓存五分钟。查询中或失败时显示 🌐，悬停查看详细信息。网速通过系统 nettop 按进程计数差值估算，短暂建立并关闭的连接可能漏计。
-- 「用眼提醒」默认关闭。首次开启时，看到「请允许通知」可在 macOS 的提示中点「允许」。通知关闭时可从「通知设置」重新开启。允许后可选每 20、30 或 45 分钟提醒一次。亮屏且已解锁时计时，锁屏、息屏或休眠后重新计时。到点发静音通知，通知操作可将下一次提醒推迟 5 分钟。
+- 「用眼提醒」默认关闭，可选每 20、30 或 45 分钟提醒一次。到点在屏幕右上角显示常驻的静音小窗，保留当前应用的键盘焦点，消息中心不留记录。点「开始休息」启动 20 秒倒计时，归零后显示「休息完成」。点「继续工作」或右上角的关闭按钮时按所选间隔重新计时，点「5 分钟后提醒」可推迟。锁屏、息屏或休眠时收起小窗，恢复后重新计时。
+
+<p>
+  <img src="Assets/MenuGauge-eye-reminder-start.png" width="280" alt="用眼提醒，开始休息和五分钟后提醒">
+  <img src="Assets/MenuGauge-eye-reminder-countdown.png" width="280" alt="休息倒计时，剩余 13 秒">
+  <img src="Assets/MenuGauge-eye-reminder-complete.png" width="280" alt="休息完成，继续工作">
+</p>
 
 Codex 额度复用本机 Codex 桌面应用的登录状态，通过其内置程序的 `account/rateLimits/read` 接口读取，不复制认证凭据、不创建对话或调用模型。启动、每分钟以及唤醒后查询，查询结束退出子进程。仅使用 `codex` 额度桶；多周期取最低剩余比例，菜单分别显示周期与重置倒计时，例如「2天6时18分钟后重置」。刷新期间或读取失败时，百分比、剩余文字、额度条和菜单栏右柱均保持最近一次成功结果，成功刷新后再更新；首次尚无数据时显示未知标记。悬停额度条或菜单栏图标可查看上次读取时间、失败原因及当前是否保留历史读数。需要安装 Codex/ChatGPT 桌面应用，应用升级改变内置程序位置时可能需要适配。[官方协议](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)。
 
